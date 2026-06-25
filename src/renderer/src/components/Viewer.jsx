@@ -1,4 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
+import { AnnotationFactory } from '../features/Annotations.js';
+
 
 // Individual Page Container Component
 function PageContainer({
@@ -81,110 +83,97 @@ function PageContainer({
     fCanvas.selection = true;
     fCanvas.isDrawingMode = false;
 
-    // Listen to selections to display active object properties
-    fCanvas.on('selection:created', (e) => {
-      const obj = e.selected[0];
+    // Helper to extract properties for selected Fabric objects
+    const handleSelection = (obj) => {
+      if (!obj) {
+        onObjectSelected(null);
+        return;
+      }
+      
       let type = 'unknown';
-      if (obj.type === 'i-text' || obj.type === 'text') type = 'text';
+      if (obj.isFormField) type = 'form-field';
+      else if (obj.isNoteCircle) type = 'note-circle';
+      else if (obj.isTextCallout) type = 'text-callout';
+      else if (obj.isStamp) type = 'stamp';
+      else if (obj.type === 'i-text' || obj.type === 'text' || obj.type === 'textbox') type = 'text';
       else if (obj.type === 'path') type = 'drawing';
+
       onObjectSelected({
         type,
         ref: obj,
-        text: obj.text,
-        fill: obj.fill,
-        stroke: obj.stroke,
-        strokeWidth: obj.strokeWidth,
-        fontSize: obj.fontSize
+        text: obj.text || '',
+        fill: obj.fill || '',
+        backgroundColor: obj.backgroundColor || '',
+        stroke: obj.stroke || '',
+        strokeWidth: obj.strokeWidth || 0,
+        fontSize: obj.fontSize || 0,
+        fontFamily: obj.fontFamily || '',
+        fontWeight: obj.fontWeight || 'normal',
+        fontStyle: obj.fontStyle || 'normal',
+        underline: !!obj.underline,
+        opacity: obj.opacity !== undefined ? obj.opacity : 1.0,
+        angle: obj.angle || 0,
+        
+        // custom attributes
+        noteText: obj.noteText || '',
+        stampText: obj.stampText || '',
+        fieldId: obj.fieldId || '',
+        fieldType: obj.fieldType || '',
+        maxLength: obj.maxLength || 0,
+        required: !!obj.required,
+        value: obj.value !== undefined ? obj.value : ''
       });
-    });
+    };
 
-    fCanvas.on('selection:updated', (e) => {
-      const obj = e.selected[0];
-      let type = 'unknown';
-      if (obj.type === 'i-text' || obj.type === 'text') type = 'text';
-      else if (obj.type === 'path') type = 'drawing';
-      onObjectSelected({
-        type,
-        ref: obj,
-        text: obj.text,
-        fill: obj.fill,
-        stroke: obj.stroke,
-        strokeWidth: obj.strokeWidth,
-        fontSize: obj.fontSize
-      });
-    });
-
-    fCanvas.on('selection:cleared', () => {
-      onObjectSelected(null);
-    });
+    fCanvas.on('selection:created', (e) => handleSelection(e.selected[0]));
+    fCanvas.on('selection:updated', (e) => handleSelection(e.selected[0]));
+    fCanvas.on('selection:cleared', () => handleSelection(null));
 
     // Clicking on canvas to place stamps, text boxes, and signature images
     fCanvas.on('mouse:down', (options) => {
+      if (activeTool === 'select') {
+        const target = options.target;
+        if (target && target.isFormField && target.fieldType === 'checkbox') {
+          target.value = !target.value;
+          const checkMark = target.item(1);
+          if (checkMark) {
+            checkMark.set('visible', target.value);
+          }
+          fCanvas.requestRenderAll();
+          handleSelection(target);
+        }
+        return;
+      }
+
       const pointer = fCanvas.getPointer(options.e);
 
       if (activeTool === 'text') {
-        const text = new window.fabric.IText('Enter text...', {
-          left: pointer.x,
-          top: pointer.y,
-          fontFamily: 'Inter, sans-serif',
-          fontSize: 14,
-          fill: commentColor,
-          editable: true
-        });
-        fCanvas.add(text);
-        fCanvas.setActiveObject(text);
-        text.enterEditing();
-        fCanvas.renderAll();
-        setActiveTool('select');
+        const text = AnnotationFactory.createText(pointer.x, pointer.y, { textColor: commentColor });
+        if (text) {
+          fCanvas.add(text);
+          fCanvas.setActiveObject(text);
+          text.enterEditing();
+          fCanvas.renderAll();
+          setActiveTool('select');
+        }
       } else if (activeTool === 'stamp') {
-        const group = new window.fabric.Group([], {
-          left: pointer.x,
-          top: pointer.y,
-          selectable: true,
-          subTargetCheck: true
-        });
-        const border = new window.fabric.Rect({
-          width: 120,
-          height: 40,
-          fill: 'rgba(16, 185, 129, 0.08)',
-          stroke: '#10b981',
-          strokeWidth: 2,
-          rx: 4,
-          ry: 4
-        });
-        const textObj = new window.fabric.Text('APPROVED', {
-          fontFamily: 'Inter, sans-serif',
-          fontSize: 13,
-          fontWeight: 'bold',
-          fill: '#10b981',
-          left: 14,
-          top: 12
-        });
-        group.addWithUpdate(border);
-        group.addWithUpdate(textObj);
-        fCanvas.add(group);
-        fCanvas.setActiveObject(group);
-        fCanvas.renderAll();
-        setActiveTool('select');
+        const stamp = AnnotationFactory.createStamp(pointer.x, pointer.y, 'APPROVED', { opacity: 1.0 });
+        if (stamp) {
+          fCanvas.add(stamp);
+          fCanvas.setActiveObject(stamp);
+          fCanvas.renderAll();
+          setActiveTool('select');
+        }
       } else if (activeTool === 'note') {
-        const circle = new window.fabric.Circle({
-          radius: 12,
-          fill: '#f59e0b',
-          stroke: '#ffffff',
-          strokeWidth: 2,
-          left: pointer.x,
-          top: pointer.y,
-          hasControls: false
-        });
-        circle.noteText = 'Enter note here...';
-        circle.isNote = true;
-        fCanvas.add(circle);
-        fCanvas.setActiveObject(circle);
-        fCanvas.renderAll();
-        setActiveTool('select');
-        const txt = prompt('Enter note content:', circle.noteText);
+        const txt = prompt('Enter note content:', 'Note details...');
         if (txt !== null) {
-          circle.noteText = txt;
+          const noteCircle = AnnotationFactory.createNoteCircle(pointer.x, pointer.y, { noteText: txt });
+          if (noteCircle) {
+            fCanvas.add(noteCircle);
+            fCanvas.setActiveObject(noteCircle);
+            fCanvas.renderAll();
+            setActiveTool('select');
+          }
         }
       } else if (activeTool === 'eraser') {
         if (options.target) {
@@ -209,17 +198,206 @@ function PageContainer({
           setActiveTool('select');
         });
       } else if (activeTool === 'textfield') {
-        onAddFormField(pageNum, 'text', pointer.x, pointer.y);
+        const fieldId = 'TextField_' + Math.random().toString(36).substring(2, 9);
+        const textfieldObj = new window.fabric.Textbox('Text Field', {
+          left: pointer.x,
+          top: pointer.y,
+          width: 140,
+          fontSize: 12,
+          fontFamily: 'Arial',
+          backgroundColor: 'rgba(0, 120, 215, 0.1)',
+          borderColor: '#0078d7',
+          borderScaleFactor: 1,
+          hasBorders: true,
+          padding: 4,
+          isFormField: true,
+          fieldType: 'text',
+          fieldId: fieldId,
+          maxLength: 0,
+          required: false,
+          value: ''
+        });
+        fCanvas.add(textfieldObj);
+        fCanvas.setActiveObject(textfieldObj);
+        fCanvas.renderAll();
+        setActiveTool('select');
       } else if (activeTool === 'checkbox') {
-        onAddFormField(pageNum, 'checkbox', pointer.x, pointer.y);
+        const fieldId = 'Checkbox_' + Math.random().toString(36).substring(2, 9);
+        const box = new window.fabric.Rect({
+          width: 20,
+          height: 20,
+          fill: 'rgba(0, 120, 215, 0.1)',
+          stroke: '#0078d7',
+          strokeWidth: 2,
+          rx: 2,
+          ry: 2,
+          left: 0,
+          top: 0
+        });
+        const check = new window.fabric.Text('✓', {
+          fontSize: 16,
+          fontWeight: 'bold',
+          fill: '#0078d7',
+          left: 4,
+          top: 0,
+          visible: false
+        });
+        const checkboxObj = new window.fabric.Group([box, check], {
+          left: pointer.x,
+          top: pointer.y,
+          width: 20,
+          height: 20,
+          selectable: true,
+          hasControls: true,
+          isFormField: true,
+          fieldType: 'checkbox',
+          fieldId: fieldId,
+          required: false,
+          value: false
+        });
+        fCanvas.add(checkboxObj);
+        fCanvas.setActiveObject(checkboxObj);
+        fCanvas.renderAll();
+        setActiveTool('select');
       }
     });
+
+    const loadAcroForms = async () => {
+      if (!window.api || !activeTab || !activeTab.filePath) return;
+      try {
+        const { PDFDocument } = await import('pdf-lib');
+        const rawBytes = await window.api.invoke('file:read', activeTab.filePath);
+        if (!rawBytes) return;
+        const pdfLibDoc = await PDFDocument.load(rawBytes);
+        const form = pdfLibDoc.getForm();
+        const fields = form.getFields();
+        const pages = pdfLibDoc.getPages();
+        const targetPage = pages[pageNum - 1];
+        if (!targetPage) return;
+        const { height: pageHeight } = targetPage.getSize();
+
+        fields.forEach(field => {
+          const widgets = field.acroField.getWidgets();
+          widgets.forEach(widget => {
+            let isOnPage = false;
+            const pageRef = widget.getOnPage();
+            if (pageRef) {
+              isOnPage = (pageRef.num === targetPage.ref.num);
+            } else {
+              const annots = targetPage.node.Annots();
+              if (annots) {
+                for (let j = 0; j < annots.size(); j++) {
+                  if (annots.get(j) === widget.ref) {
+                    isOnPage = true;
+                    break;
+                  }
+                }
+              }
+            }
+
+            if (!isOnPage) return;
+
+            const rect = widget.getRectangle();
+            if (!rect) return;
+
+            const left = rect.x;
+            const top = pageHeight - rect.y - rect.height;
+            const width = rect.width;
+            const height = rect.height;
+
+            const fieldName = field.getName();
+            const required = field.isRequired();
+            let value = '';
+            try {
+              value = typeof field.getText === 'function' ? field.getText() : (typeof field.isChecked === 'function' ? field.isChecked() : '');
+            } catch (e) {}
+
+            let fabricFieldObj = null;
+            const isText = typeof field.getText === 'function';
+            const isCheckbox = typeof field.isChecked === 'function';
+
+            if (isText) {
+              let maxLength = 0;
+              try {
+                maxLength = field.getMaxLength() || 0;
+              } catch (e) {}
+
+              fabricFieldObj = new window.fabric.Textbox(value || '', {
+                left,
+                top,
+                width,
+                height,
+                fontSize: 12,
+                fontFamily: 'Arial',
+                backgroundColor: 'rgba(0, 120, 215, 0.1)',
+                borderColor: '#0078d7',
+                borderScaleFactor: 1,
+                hasBorders: true,
+                padding: 4,
+                isFormField: true,
+                fieldType: 'text',
+                fieldId: fieldName,
+                maxLength,
+                required,
+                value: value || ''
+              });
+            } else if (isCheckbox) {
+              const box = new window.fabric.Rect({
+                width: 20,
+                height: 20,
+                fill: 'rgba(0, 120, 215, 0.1)',
+                stroke: '#0078d7',
+                strokeWidth: 2,
+                rx: 2,
+                ry: 2,
+                left: 0,
+                top: 0
+              });
+              const check = new window.fabric.Text('✓', {
+                fontSize: 16,
+                fontWeight: 'bold',
+                fill: '#0078d7',
+                left: 4,
+                top: 0,
+                visible: !!value
+              });
+              fabricFieldObj = new window.fabric.Group([box, check], {
+                left,
+                top,
+                width: 20,
+                height: 20,
+                selectable: true,
+                hasControls: true,
+                isFormField: true,
+                fieldType: 'checkbox',
+                fieldId: fieldName,
+                required,
+                value: !!value
+              });
+            }
+
+            if (fabricFieldObj) {
+              const existingObjects = fCanvas.getObjects();
+              const alreadyExists = existingObjects.some(o => o.isFormField && o.fieldId === fieldName);
+              if (!alreadyExists) {
+                fCanvas.add(fabricFieldObj);
+              }
+            }
+          });
+        });
+        fCanvas.requestRenderAll();
+      } catch (err) {
+        console.error("Error loading AcroForms for page overlay:", err);
+      }
+    };
+
+    loadAcroForms();
 
     return () => {
       fCanvas.dispose();
       unregisterFabricInstance(pageNum);
     };
-  }, [pageNum, size, activeTool, commentColor, savedSignatureDataUrl]);
+  }, [pageNum, size, activeTool, commentColor, savedSignatureDataUrl, activeTab]);
 
   // Synchronize tools selection changes
   useEffect(() => {

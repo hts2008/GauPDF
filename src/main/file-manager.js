@@ -3,7 +3,7 @@ import { app, dialog } from 'electron';
 import fs from 'fs/promises';
 import path from 'path';
 import chokidar from 'chokidar';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
 import { createWorker } from 'tesseract.js';
 import store from './store.js';
 import { IPC_CHANNELS } from '../shared/constants.js';
@@ -354,4 +354,226 @@ export async function executeOCR(imageBufferOrPath, language = 'eng') {
     console.error('OCR Execution Failed:', error);
     throw error;
   }
+}
+
+/**
+ * Low-level: Apply watermark to a PDF's byte array
+ */
+export async function applyWatermark(pdfBytes, options = {}) {
+  const pdfDoc = await PDFDocument.load(pdfBytes);
+  const pages = pdfDoc.getPages();
+  const type = options.type || 'text';
+
+  if (type === 'text') {
+    const text = options.text || 'CONFIDENTIAL';
+    const fontName = options.fontName || 'Helvetica';
+    
+    const fontMapping = {
+      'Helvetica': StandardFonts.Helvetica,
+      'Helvetica-Bold': StandardFonts.HelveticaBold,
+      'Times-Roman': StandardFonts.TimesRoman,
+      'Times-Bold': StandardFonts.TimesRomanBold,
+      'Courier': StandardFonts.Courier,
+      'Courier-Bold': StandardFonts.CourierBold
+    };
+    const standardFont = fontMapping[fontName] || StandardFonts.Helvetica;
+    const fontObj = await pdfDoc.embedFont(standardFont);
+    
+    const size = options.fontSize || 50;
+    const rotationDegrees = options.rotation !== undefined ? options.rotation : 45;
+    const opacity = options.opacity !== undefined ? options.opacity : 0.3;
+    
+    let textColor = rgb(0.5, 0.5, 0.5);
+    if (options.color) {
+      if (Array.isArray(options.color)) {
+        textColor = rgb(options.color[0], options.color[1], options.color[2]);
+      } else if (typeof options.color === 'object') {
+        textColor = rgb(
+          options.color.r !== undefined ? options.color.r : 0.5,
+          options.color.g !== undefined ? options.color.g : 0.5,
+          options.color.b !== undefined ? options.color.b : 0.5
+        );
+      }
+    }
+
+    const textWidth = fontObj.widthOfTextAtSize(text, size);
+    const textHeight = fontObj.heightAtSize(size);
+
+    for (const page of pages) {
+      const { width, height } = page.getSize();
+      
+      const rad = (rotationDegrees * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      
+      const rotatedWidth = Math.abs(textWidth * cos) + Math.abs(textHeight * sin);
+      const rotatedHeight = Math.abs(textWidth * sin) + Math.abs(textHeight * cos);
+      
+      const x = (width - rotatedWidth) / 2 + Math.abs(textHeight * sin) / 2;
+      const y = (height - rotatedHeight) / 2;
+
+      page.drawText(text, {
+        x: options.x !== undefined ? options.x : x,
+        y: options.y !== undefined ? options.y : y,
+        size,
+        font: fontObj,
+        color: textColor,
+        rotate: degrees(rotationDegrees),
+        opacity
+      });
+    }
+  } else if (type === 'image') {
+    let imageBytes = options.imageBytes;
+    if (!imageBytes && options.imagePath) {
+      imageBytes = await fs.readFile(options.imagePath);
+    }
+    
+    if (!imageBytes) {
+      throw new Error('Image bytes or imagePath is required for image watermark');
+    }
+
+    const imageType = (options.imageType || 'png').toLowerCase();
+    let embeddedImage;
+    if (imageType === 'png') {
+      embeddedImage = await pdfDoc.embedPng(imageBytes);
+    } else if (imageType === 'jpg' || imageType === 'jpeg') {
+      embeddedImage = await pdfDoc.embedJpg(imageBytes);
+    } else {
+      throw new Error(`Unsupported image type for watermark: ${imageType}`);
+    }
+
+    const scale = options.scale || 1.0;
+    const imageDims = embeddedImage.scale(scale);
+    const opacity = options.opacity !== undefined ? options.opacity : 0.3;
+
+    for (const page of pages) {
+      const { width, height } = page.getSize();
+      
+      const x = options.x !== undefined ? options.x : (width - imageDims.width) / 2;
+      const y = options.y !== undefined ? options.y : (height - imageDims.height) / 2;
+
+      page.drawImage(embeddedImage, {
+        x,
+        y,
+        width: imageDims.width,
+        height: imageDims.height,
+        opacity
+      });
+    }
+  }
+
+  return await pdfDoc.save({ useObjectStreams: true });
+}
+
+/**
+ * Low-level: Apply headers/footers to a PDF's byte array
+ */
+export async function applyHeaderFooter(pdfBytes, options = {}) {
+  const pdfDoc = await PDFDocument.load(pdfBytes);
+  const pages = pdfDoc.getPages();
+  const totalPages = pages.length;
+
+  const fontName = options.fontName || 'Helvetica';
+  const fontMapping = {
+    'Helvetica': StandardFonts.Helvetica,
+    'Helvetica-Bold': StandardFonts.HelveticaBold,
+    'Times-Roman': StandardFonts.TimesRoman,
+    'Times-Bold': StandardFonts.TimesRomanBold,
+    'Courier': StandardFonts.Courier,
+    'Courier-Bold': StandardFonts.CourierBold
+  };
+  const standardFont = fontMapping[fontName] || StandardFonts.Helvetica;
+  const fontObj = await pdfDoc.embedFont(standardFont);
+  
+  const size = options.fontSize || 9;
+  const margin = options.margin !== undefined ? options.margin : 30;
+  
+  let textColor = rgb(0.3, 0.3, 0.3);
+  if (options.color) {
+    if (Array.isArray(options.color)) {
+      textColor = rgb(options.color[0], options.color[1], options.color[2]);
+    } else if (typeof options.color === 'object') {
+      textColor = rgb(
+        options.color.r !== undefined ? options.color.r : 0.3,
+        options.color.g !== undefined ? options.color.g : 0.3,
+        options.color.b !== undefined ? options.color.b : 0.3
+      );
+    }
+  }
+
+  for (let i = 0; i < totalPages; i++) {
+    if (i === 0 && options.excludeFirstPage) {
+      continue;
+    }
+
+    const page = pages[i];
+    const { width, height } = page.getSize();
+
+    // Draw header text
+    if (options.headerText) {
+      const textWidth = fontObj.widthOfTextAtSize(options.headerText, size);
+      const x = options.headerAlign === 'left' ? margin :
+                options.headerAlign === 'right' ? (width - textWidth - margin) :
+                (width - textWidth) / 2; // default center
+      page.drawText(options.headerText, {
+        x,
+        y: height - margin,
+        size,
+        font: fontObj,
+        color: textColor
+      });
+    }
+
+    // Draw footer text
+    let footerText = options.footerText || '';
+    if (options.showPageNumbers) {
+      const pageNumStr = (options.pageNumberFormat || 'Page {page} of {total}')
+        .replace('{page}', String(i + 1))
+        .replace('{total}', String(totalPages));
+      
+      if (footerText) {
+        footerText = `${footerText} | ${pageNumStr}`;
+      } else {
+        footerText = pageNumStr;
+      }
+    }
+
+    if (footerText) {
+      const textWidth = fontObj.widthOfTextAtSize(footerText, size);
+      const x = options.footerAlign === 'left' ? margin :
+                options.footerAlign === 'right' ? (width - textWidth - margin) :
+                (width - textWidth) / 2; // default center
+      page.drawText(footerText, {
+        x,
+        y: margin,
+        size,
+        font: fontObj,
+        color: textColor
+      });
+    }
+  }
+
+  return await pdfDoc.save({ useObjectStreams: true });
+}
+
+/**
+ * Add watermark to a PDF file and save it
+ */
+export async function addWatermark(filePath, options = {}, outputPath = null) {
+  const bytes = await fs.readFile(filePath);
+  const modifiedBytes = await applyWatermark(bytes, options);
+  const targetPath = outputPath || filePath;
+  await fs.writeFile(targetPath, Buffer.from(modifiedBytes));
+  return { success: true, filePath: targetPath };
+}
+
+/**
+ * Add headers/footers to a PDF file and save it
+ */
+export async function addHeaderFooter(filePath, options = {}, outputPath = null) {
+  const bytes = await fs.readFile(filePath);
+  const modifiedBytes = await applyHeaderFooter(bytes, options);
+  const targetPath = outputPath || filePath;
+  await fs.writeFile(targetPath, Buffer.from(modifiedBytes));
+  return { success: true, filePath: targetPath };
 }

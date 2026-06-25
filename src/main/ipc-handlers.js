@@ -13,8 +13,11 @@ import {
   mergePDFs,
   splitPDF,
   compressPDF,
-  executeOCR
+  executeOCR,
+  addWatermark,
+  addHeaderFooter
 } from './file-manager.js';
+import { convertToPdf, convertFromPdf } from './libreoffice-service.js';
 import { getPrinters, printExecute, printToPDF } from './print-manager.js';
 import store from './store.js';
 import WindowManager from './window-manager.js';
@@ -158,6 +161,30 @@ export function registerIpcHandlers() {
     const filePath = typeof payload === 'string' ? payload : payload.filePath;
     console.log(`[IPC] pdf:compress requested for file: ${filePath}`);
     return await compressPDF(win, filePath);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.PDF_CONVERT_TO_PDF, async (event, payload) => {
+    const { filePath, outDir } = typeof payload === 'string' ? { filePath: payload } : payload || {};
+    console.log(`[IPC] pdf:convert-to-pdf requested for: ${filePath}`);
+    return await convertToPdf(filePath, outDir);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.PDF_CONVERT_FROM_PDF, async (event, payload) => {
+    const { filePath, targetFormat, outDir } = payload || {};
+    console.log(`[IPC] pdf:convert-from-pdf requested for: ${filePath} to format: ${targetFormat}`);
+    return await convertFromPdf(filePath, targetFormat, outDir);
+  });
+
+  ipcMain.handle('pdf:add-watermark', async (event, payload) => {
+    const { filePath, options, outputPath } = payload || {};
+    console.log(`[IPC] pdf:add-watermark requested for: ${filePath}`);
+    return await addWatermark(filePath, options, outputPath);
+  });
+
+  ipcMain.handle('pdf:add-header-footer', async (event, payload) => {
+    const { filePath, options, outputPath } = payload || {};
+    console.log(`[IPC] pdf:add-header-footer requested for: ${filePath}`);
+    return await addHeaderFooter(filePath, options, outputPath);
   });
 
   // --- OCR Operations ---

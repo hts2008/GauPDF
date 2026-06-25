@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
+import { PDFDocument, rgb } from 'pdf-lib';
 
 // Configure PDF.js Worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -31,7 +32,7 @@ export function usePDF(containerRef, history, options = {}) {
   const [currentPage, setCurrentPage] = useState(1);
   const [numPages, setNumPages] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [currentMode, setCurrentMode] = useState('select'); // select, draw, highlight, text, rect, circle, line, arrow, eraser
+  const [currentMode, setCurrentMode] = useState('select'); // select, draw, highlight, text, rect, circle, line, arrow, eraser, note, callout, stamp, textfield, checkbox
   
   const [drawingSettings, setDrawingSettings] = useState({
     strokeColor: '#ff0000',
@@ -41,10 +42,13 @@ export function usePDF(containerRef, history, options = {}) {
     highlightWidth: 24,
     fontSize: 18,
     fontFamily: 'Arial',
-    textColor: '#ff0000'
+    textColor: '#ff0000',
+    stampText: 'APPROVED',
+    opacity: 1.0
   });
 
   const pdfDocRef = useRef(null);
+  const pdfLibDocRef = useRef(null);
   const pagesRef = useRef([]); // Stores page wrappers, canvas info, and render tasks
   const canvasesMapRef = useRef(new Map()); // pageNumber -> fabric.Canvas
   const activeDrawingObjectRef = useRef(null);
@@ -130,7 +134,23 @@ export function usePDF(containerRef, history, options = {}) {
   // Setup Fabric.js interaction events
   const setupCanvasEvents = useCallback((canvas) => {
     canvas.on('mouse:down', (options) => {
-      if (currentMode === 'select' || currentMode === 'draw' || currentMode === 'highlight') return;
+      if (currentMode === 'select') {
+        const target = options.target;
+        if (target && target.isFormField && target.fieldType === 'checkbox') {
+          target.value = !target.value;
+          const checkMark = target.item(1);
+          if (checkMark) {
+            checkMark.set('visible', target.value);
+          }
+          canvas.requestRenderAll();
+          const before = { value: !target.value };
+          const after = { value: target.value };
+          executeCommand(new ModifyObjectCommand(canvas, target, before, after));
+        }
+        return;
+      }
+
+      if (currentMode === 'draw' || currentMode === 'highlight') return;
 
       const pointer = getCanvasPointer(canvas, options.e);
       startXRef.current = pointer.x;
@@ -146,6 +166,112 @@ export function usePDF(containerRef, history, options = {}) {
           textObj.selectAll();
           setCurrentMode('select');
         }
+        return;
+      }
+
+      if (currentMode === 'note') {
+        const noteText = prompt('Enter note content:', 'Note details...');
+        if (noteText === null) return;
+        const noteObj = AnnotationFactory.createNoteCircle(pointer.x, pointer.y, { ...drawingSettings, noteText });
+        if (noteObj) {
+          canvas.add(noteObj);
+          canvas.setActiveObject(noteObj);
+          executeCommand(new AddObjectCommand(canvas, noteObj));
+          setCurrentMode('select');
+        }
+        return;
+      }
+
+      if (currentMode === 'callout') {
+        const calloutObj = AnnotationFactory.createTextCallout(pointer.x, pointer.y, drawingSettings);
+        if (calloutObj) {
+          canvas.add(calloutObj);
+          canvas.setActiveObject(calloutObj);
+          executeCommand(new AddObjectCommand(canvas, calloutObj));
+          calloutObj.enterEditing();
+          calloutObj.selectAll();
+          setCurrentMode('select');
+        }
+        return;
+      }
+
+      if (currentMode === 'stamp') {
+        const stampText = drawingSettings.stampText || 'APPROVED';
+        const stampObj = AnnotationFactory.createStamp(pointer.x, pointer.y, stampText, drawingSettings);
+        if (stampObj) {
+          canvas.add(stampObj);
+          canvas.setActiveObject(stampObj);
+          executeCommand(new AddObjectCommand(canvas, stampObj));
+          setCurrentMode('select');
+        }
+        return;
+      }
+
+      if (currentMode === 'textfield') {
+        const fieldId = 'TextField_' + Math.random().toString(36).substring(2, 9);
+        const textfieldObj = new window.fabric.Textbox('Text Field', {
+          left: pointer.x,
+          top: pointer.y,
+          width: 140,
+          fontSize: 12,
+          fontFamily: 'Arial',
+          backgroundColor: 'rgba(0, 120, 215, 0.1)',
+          borderColor: '#0078d7',
+          borderScaleFactor: 1,
+          hasBorders: true,
+          padding: 4,
+          isFormField: true,
+          fieldType: 'text',
+          fieldId: fieldId,
+          maxLength: 0,
+          required: false,
+          value: ''
+        });
+        canvas.add(textfieldObj);
+        canvas.setActiveObject(textfieldObj);
+        executeCommand(new AddObjectCommand(canvas, textfieldObj));
+        setCurrentMode('select');
+        return;
+      }
+
+      if (currentMode === 'checkbox') {
+        const fieldId = 'Checkbox_' + Math.random().toString(36).substring(2, 9);
+        const box = new window.fabric.Rect({
+          width: 20,
+          height: 20,
+          fill: 'rgba(0, 120, 215, 0.1)',
+          stroke: '#0078d7',
+          strokeWidth: 2,
+          rx: 2,
+          ry: 2,
+          left: 0,
+          top: 0
+        });
+        const check = new window.fabric.Text('✓', {
+          fontSize: 16,
+          fontWeight: 'bold',
+          fill: '#0078d7',
+          left: 4,
+          top: 0,
+          visible: false
+        });
+        const checkboxObj = new window.fabric.Group([box, check], {
+          left: pointer.x,
+          top: pointer.y,
+          width: 20,
+          height: 20,
+          selectable: true,
+          hasControls: true,
+          isFormField: true,
+          fieldType: 'checkbox',
+          fieldId: fieldId,
+          required: false,
+          value: false
+        });
+        canvas.add(checkboxObj);
+        canvas.setActiveObject(checkboxObj);
+        executeCommand(new AddObjectCommand(canvas, checkboxObj));
+        setCurrentMode('select');
         return;
       }
 
@@ -326,6 +452,133 @@ export function usePDF(containerRef, history, options = {}) {
     return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
   }, [executeCommand]);
 
+  // Load and render existing PDF AcroForms using pdf-lib on a canvas
+  const loadAcroFormsForPage = useCallback((canvas, pageNumber) => {
+    if (!pdfLibDocRef.current) return;
+    try {
+      const form = pdfLibDocRef.current.getForm();
+      const fields = form.getFields();
+      const pages = pdfLibDocRef.current.getPages();
+      const targetPage = pages[pageNumber - 1];
+      if (!targetPage) return;
+      const { height: pageHeight } = targetPage.getSize();
+
+      fields.forEach(field => {
+        const widgets = field.acroField.getWidgets();
+        widgets.forEach(widget => {
+          let isOnPage = false;
+          const pageRef = widget.getOnPage();
+          if (pageRef) {
+            isOnPage = (pageRef === targetPage.ref || pageRef.num === targetPage.ref.num);
+          } else {
+            const annots = targetPage.node.Annots();
+            if (annots) {
+              for (let j = 0; j < annots.size(); j++) {
+                if (annots.get(j) === widget.ref) {
+                  isOnPage = true;
+                  break;
+                }
+              }
+            }
+          }
+
+          if (!isOnPage) return;
+
+          const rect = widget.getRectangle();
+          if (!rect) return;
+
+          // Convert PDF coordinates to Fabric coordinates
+          const zoom = canvas.getZoom() || 1.0;
+          const left = rect.x * zoom;
+          const top = (pageHeight - rect.y - rect.height) * zoom;
+          const width = rect.width * zoom;
+          const height = rect.height * zoom;
+
+          const fieldName = field.getName();
+          const required = field.isRequired();
+          let value = '';
+          try {
+            value = typeof field.getText === 'function' ? field.getText() : (typeof field.isChecked === 'function' ? field.isChecked() : '');
+          } catch (e) {}
+
+          const fabric = window.fabric;
+          if (!fabric) return;
+
+          let fabricFieldObj = null;
+          const isText = typeof field.getText === 'function';
+          const isCheckbox = typeof field.isChecked === 'function';
+
+          if (isText) {
+            let maxLength = 0;
+            try {
+              maxLength = field.getMaxLength() || 0;
+            } catch (e) {}
+
+            fabricFieldObj = new fabric.Textbox(value || '', {
+              left,
+              top,
+              width,
+              height,
+              fontSize: 12,
+              fontFamily: 'Arial',
+              backgroundColor: 'rgba(0, 120, 215, 0.1)',
+              borderColor: '#0078d7',
+              borderScaleFactor: 1,
+              hasBorders: true,
+              padding: 4,
+              isFormField: true,
+              fieldType: 'text',
+              fieldId: fieldName,
+              maxLength,
+              required,
+              value: value || ''
+            });
+          } else if (isCheckbox) {
+            const box = new fabric.Rect({
+              width: 20,
+              height: 20,
+              fill: 'rgba(0, 120, 215, 0.1)',
+              stroke: '#0078d7',
+              strokeWidth: 2,
+              rx: 2,
+              ry: 2,
+              left: 0,
+              top: 0
+            });
+            const check = new fabric.Text('✓', {
+              fontSize: 16,
+              fontWeight: 'bold',
+              fill: '#0078d7',
+              left: 4,
+              top: 0,
+              visible: !!value
+            });
+            fabricFieldObj = new fabric.Group([box, check], {
+              left,
+              top,
+              width: 20,
+              height: 20,
+              selectable: true,
+              hasControls: true,
+              isFormField: true,
+              fieldType: 'checkbox',
+              fieldId: fieldName,
+              required,
+              value: !!value
+            });
+          }
+
+          if (fabricFieldObj) {
+            canvas.add(fabricFieldObj);
+          }
+        });
+      });
+      canvas.requestRenderAll();
+    } catch (err) {
+      console.error("Error loading AcroForms for page:", err);
+    }
+  }, []);
+
   // Render a specific page
   const renderPage = useCallback(async (pageNumber, currentScale, currentRotation) => {
     const pageData = pagesRef.current.find(p => p.pageNumber === pageNumber);
@@ -385,6 +638,7 @@ export function usePDF(containerRef, history, options = {}) {
           });
           canvasesMapRef.current.set(pageNumber, fabricCanvas);
           setupCanvasEvents(fabricCanvas);
+          loadAcroFormsForPage(fabricCanvas, pageNumber);
         } else {
           fabricCanvas.setDimensions({ width, height });
           fabricCanvas.setZoom(currentScale);
@@ -399,7 +653,7 @@ export function usePDF(containerRef, history, options = {}) {
       }
       console.error(`Error rendering page ${pageNumber}:`, err);
     }
-  }, [config.renderInteractiveForms, applyModeToCanvas, setupCanvasEvents]);
+  }, [config.renderInteractiveForms, applyModeToCanvas, setupCanvasEvents, loadAcroFormsForPage]);
 
   // Re-render pages when scale or rotation changes
   useEffect(() => {
@@ -418,20 +672,23 @@ export function usePDF(containerRef, history, options = {}) {
     try {
       destroyViewer();
 
-      let loadingTask;
-      if (src instanceof ArrayBuffer || ArrayBuffer.isView(src)) {
-        loadingTask = pdfjsLib.getDocument({
-          data: src,
-          cMapUrl: 'node_modules/pdfjs-dist/cmaps/',
-          cMapPacked: true,
-        });
+      let pdfBytes;
+      if (src instanceof ArrayBuffer) {
+        pdfBytes = new Uint8Array(src);
+      } else if (ArrayBuffer.isView(src)) {
+        pdfBytes = new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
       } else {
-        loadingTask = pdfjsLib.getDocument({
-          url: src,
-          cMapUrl: 'node_modules/pdfjs-dist/cmaps/',
-          cMapPacked: true,
-        });
+        const response = await fetch(src);
+        pdfBytes = new Uint8Array(await response.arrayBuffer());
       }
+      pdfBytesRef.current = pdfBytes;
+      pdfLibDocRef.current = await PDFDocument.load(pdfBytes);
+
+      const loadingTask = pdfjsLib.getDocument({
+        data: pdfBytes,
+        cMapUrl: 'node_modules/pdfjs-dist/cmaps/',
+        cMapPacked: true,
+      });
 
       const doc = await loadingTask.promise;
       pdfDocRef.current = doc;
@@ -588,54 +845,103 @@ export function usePDF(containerRef, history, options = {}) {
           const after = {};
           let modified = false;
 
-          if (activeObj.type === 'i-text') {
-            if (newSettings.textColor) {
-              before.fill = activeObj.fill;
-              activeObj.set('fill', newSettings.textColor);
-              after.fill = newSettings.textColor;
+          // Helper to record before/after states for undo history
+          const setProp = (propName, newVal) => {
+            if (newVal !== undefined && activeObj.get(propName) !== newVal) {
+              before[propName] = activeObj.get(propName);
+              activeObj.set(propName, newVal);
+              after[propName] = newVal;
               modified = true;
             }
-            if (newSettings.fontSize) {
-              before.fontSize = activeObj.fontSize;
-              activeObj.set('fontSize', newSettings.fontSize);
-              after.fontSize = newSettings.fontSize;
-              modified = true;
-            }
-            if (newSettings.fontFamily) {
-              before.fontFamily = activeObj.fontFamily;
-              activeObj.set('fontFamily', newSettings.fontFamily);
-              after.fontFamily = newSettings.fontFamily;
-              modified = true;
-            }
+          };
+
+          // Apply styling properties
+          if (activeObj.type === 'i-text' || activeObj.type === 'textbox' || activeObj.isTextCallout) {
+            if (newSettings.textColor) setProp('fill', newSettings.textColor);
+            if (newSettings.fontSize) setProp('fontSize', newSettings.fontSize);
+            if (newSettings.fontFamily) setProp('fontFamily', newSettings.fontFamily);
+            if (newSettings.fontWeight) setProp('fontWeight', newSettings.fontWeight);
+            if (newSettings.fontStyle) setProp('fontStyle', newSettings.fontStyle);
+            if (newSettings.underline !== undefined) setProp('underline', newSettings.underline);
+            if (newSettings.fillColor && activeObj.isTextCallout) setProp('backgroundColor', newSettings.fillColor);
+            if (newSettings.strokeColor && activeObj.isTextCallout) setProp('stroke', newSettings.strokeColor);
+            if (newSettings.strokeWidth && activeObj.isTextCallout) setProp('strokeWidth', newSettings.strokeWidth);
           } else {
-            if (newSettings.strokeColor) {
-              before.stroke = activeObj.stroke;
-              activeObj.set('stroke', newSettings.strokeColor);
-              after.stroke = newSettings.strokeColor;
+            if (newSettings.strokeColor) setProp('stroke', newSettings.strokeColor);
+            if (newSettings.fillColor) setProp('fill', newSettings.fillColor);
+            if (newSettings.strokeWidth) setProp('strokeWidth', newSettings.strokeWidth);
+          }
+
+          if (newSettings.opacity !== undefined) {
+            setProp('opacity', newSettings.opacity);
+          }
+
+          // Custom stamp text updates
+          if (activeObj.isStamp && newSettings.stampText) {
+            before.stampText = activeObj.stampText;
+            activeObj.stampText = newSettings.stampText;
+            after.stampText = newSettings.stampText;
+            const stampTextObj = activeObj.item(1);
+            if (stampTextObj) {
+              before.text = stampTextObj.text;
+              stampTextObj.set('text', newSettings.stampText.toUpperCase());
+              after.text = newSettings.stampText.toUpperCase();
+            }
+            modified = true;
+          }
+
+          // Custom note text updates
+          if (activeObj.isNoteCircle && newSettings.noteText) {
+            before.noteText = activeObj.noteText;
+            activeObj.noteText = newSettings.noteText;
+            after.noteText = newSettings.noteText;
+            modified = true;
+          }
+
+          // Form field updates
+          if (activeObj.isFormField) {
+            if (newSettings.fieldId) {
+              before.fieldId = activeObj.fieldId;
+              activeObj.fieldId = newSettings.fieldId;
+              after.fieldId = newSettings.fieldId;
               modified = true;
             }
-            if (newSettings.fillColor) {
-              before.fill = activeObj.fill;
-              activeObj.set('fill', newSettings.fillColor);
-              after.fill = newSettings.fillColor;
+            if (newSettings.required !== undefined) {
+              before.required = activeObj.required;
+              activeObj.required = newSettings.required;
+              after.required = newSettings.required;
               modified = true;
             }
-            if (newSettings.strokeWidth) {
-              before.strokeWidth = activeObj.strokeWidth;
-              activeObj.set('strokeWidth', newSettings.strokeWidth);
-              after.strokeWidth = newSettings.strokeWidth;
+            if (newSettings.maxLength !== undefined && activeObj.fieldType === 'text') {
+              before.maxLength = activeObj.maxLength;
+              activeObj.maxLength = newSettings.maxLength;
+              after.maxLength = newSettings.maxLength;
+              modified = true;
+            }
+            if (newSettings.value !== undefined) {
+              before.value = activeObj.value;
+              activeObj.value = newSettings.value;
+              after.value = newSettings.value;
+              
+              if (activeObj.fieldType === 'checkbox') {
+                const checkMark = activeObj.item(1);
+                if (checkMark) checkMark.set('visible', !!newSettings.value);
+              } else if (activeObj.fieldType === 'text') {
+                activeObj.set('text', newSettings.value);
+              }
               modified = true;
             }
           }
 
           if (modified) {
             executeCommand(new ModifyObjectCommand(canvas, activeObj, before, after));
+            canvas.requestRenderAll();
           }
         }
       });
 
       return updated;
-    });
+    };
   };
 
   // Annotations controls
@@ -653,7 +959,7 @@ export function usePDF(containerRef, history, options = {}) {
   const exportAnnotations = () => {
     const data = [];
     canvasesMapRef.current.forEach((canvas, pageNum) => {
-      const json = canvas.toJSON();
+      const json = canvas.toJSON(['isNoteCircle', 'noteText', 'isTextCallout', 'isStamp', 'stampText', 'isFormField', 'fieldType', 'fieldId', 'maxLength', 'required', 'value']);
       data.push({
         pageNumber: pageNum,
         annotations: json.objects
@@ -689,6 +995,106 @@ export function usePDF(containerRef, history, options = {}) {
     clearHistory();
   };
 
+  // Compile Fabric form fields and return modified PDF Uint8Array bytes using pdf-lib
+  const compilePDF = async () => {
+    if (!pdfLibDocRef.current) return null;
+    try {
+      const form = pdfLibDocRef.current.getForm();
+      const pages = pdfLibDocRef.current.getPages();
+
+      // Synchronize deletion: remove form fields that are no longer present on any canvas
+      const activeFieldIds = new Set();
+      canvasesMapRef.current.forEach(canvas => {
+        canvas.getObjects().forEach(obj => {
+          if (obj.isFormField) {
+            activeFieldIds.add(obj.fieldId);
+          }
+        });
+      });
+
+      const fields = form.getFields();
+      fields.forEach(field => {
+        const name = field.getName();
+        if (!activeFieldIds.has(name)) {
+          try {
+            form.removeField(field);
+          } catch (e) {
+            console.warn(`Could not remove field ${name}:`, e);
+          }
+        }
+      });
+
+      // Update or create form fields on their respective pages
+      for (const [pageNum, canvas] of canvasesMapRef.current.entries()) {
+        const page = pages[pageNum - 1];
+        if (!page) continue;
+        const { height: pageHeight } = page.getSize();
+        const zoom = canvas.getZoom() || 1.0;
+        const objects = canvas.getObjects();
+
+        for (const obj of objects) {
+          if (obj.isFormField) {
+            const x = obj.left / zoom;
+            const y = pageHeight - (obj.top / zoom) - ((obj.height * obj.scaleY) / zoom);
+            const w = (obj.width * obj.scaleX) / zoom;
+            const h = (obj.height * obj.scaleY) / zoom;
+
+            if (obj.fieldType === 'text') {
+              let textField;
+              try {
+                textField = form.getTextField(obj.fieldId);
+              } catch (e) {
+                textField = form.createTextField(obj.fieldId);
+              }
+              textField.setText(obj.text || obj.value || '');
+              if (obj.maxLength > 0) {
+                textField.setMaxLength(obj.maxLength);
+              }
+              textField.setRequired(!!obj.required);
+              
+              try {
+                textField.acroField.getWidgets().forEach(w => textField.acroField.removeWidget(w));
+                textField.addToPage(page, { x, y, width: w, height: h });
+              } catch (err) {
+                try {
+                  textField.addToPage(page, { x, y, width: w, height: h });
+                } catch (e2) {}
+              }
+            } else if (obj.fieldType === 'checkbox') {
+              let checkBox;
+              try {
+                checkBox = form.getCheckBox(obj.fieldId);
+              } catch (e) {
+                checkBox = form.createCheckBox(obj.fieldId);
+              }
+              if (obj.value) {
+                checkBox.check();
+              } else {
+                checkBox.uncheck();
+              }
+              checkBox.setRequired(!!obj.required);
+
+              try {
+                checkBox.acroField.getWidgets().forEach(w => checkBox.acroField.removeWidget(w));
+                checkBox.addToPage(page, { x, y, width: w, height: h });
+              } catch (err) {
+                try {
+                  checkBox.addToPage(page, { x, y, width: w, height: h });
+                } catch (e2) {}
+              }
+            }
+          }
+        }
+      }
+
+      const pdfBytes = await pdfLibDocRef.current.save();
+      return pdfBytes;
+    } catch (err) {
+      console.error("Error compiling PDF form fields:", err);
+      return null;
+    }
+  };
+
   return {
     scale,
     rotation,
@@ -710,6 +1116,7 @@ export function usePDF(containerRef, history, options = {}) {
     exportAnnotations,
     importAnnotations,
     clearAnnotations,
+    compilePDF,
     fabricCanvases: canvasesMapRef.current
   };
 }

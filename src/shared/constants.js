@@ -11,6 +11,8 @@ export const IPC_CHANNELS = {
   PDF_MERGE: 'pdf:merge',
   PDF_SPLIT: 'pdf:split',
   PDF_COMPRESS: 'pdf:compress',
+  PDF_CONVERT_TO_PDF: 'pdf:convert-to-pdf',
+  PDF_CONVERT_FROM_PDF: 'pdf:convert-from-pdf',
   APP_RECENT_FILES: 'app:recent-files',
   APP_SETTINGS: 'app:settings',
   APP_MINIMIZE: 'app:minimize',

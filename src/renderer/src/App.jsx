@@ -6,6 +6,8 @@ import Sidebar from './components/Sidebar.jsx';
 import Viewer from './components/Viewer.jsx';
 import { IPC_CHANNELS, MODES, THEMES } from '../../shared/constants.js';
 import { NotificationSystem } from './utils/notifications.js';
+import WatermarkDialog from './components/WatermarkDialog.jsx';
+import HeaderFooterDialog from './components/HeaderFooterDialog.jsx';
 
 import * as pdfjsLib from 'pdfjs-dist';
 // Configure the PDF.js worker path
@@ -37,6 +39,13 @@ export default function App() {
   const [showOcrDialog, setShowOcrDialog] = useState(false);
   const [showSettingsDialog, setShowSettingsDialog] = useState(false);
   const [showSignatureDialog, setShowSignatureDialog] = useState(false);
+  const [showWatermarkDialog, setShowWatermarkDialog] = useState(false);
+  const [showHeaderFooterDialog, setShowHeaderFooterDialog] = useState(false);
+  const [showConvertFromPdfDialog, setShowConvertFromPdfDialog] = useState(false);
+  const [convertTargetFormat, setConvertTargetFormat] = useState('docx');
+  const [conversionProgress, setConversionProgress] = useState(0);
+  const [showConversionProgress, setShowConversionProgress] = useState(false);
+  const [conversionStatus, setConversionStatus] = useState('');
 
   // Modals fields state
   const [mergeFiles, setMergeFiles] = useState([]);
@@ -321,22 +330,120 @@ export default function App() {
 
     const serializedAnnotations = {};
     Object.entries(fabricInstancesRef.current).forEach(([pageNum, instance]) => {
-      serializedAnnotations[pageNum] = instance.toJSON();
+      serializedAnnotations[pageNum] = instance.toJSON(['isNoteCircle', 'noteText', 'isTextCallout', 'isStamp', 'stampText', 'isFormField', 'fieldType', 'fieldId', 'maxLength', 'required', 'value']);
     });
 
-    const serializedFormData = formFields.filter(f => f.tabId === activeTabId).map(f => ({
-      id: f.id,
-      pageNum: f.pageNum,
-      type: f.type,
-      value: f.value
-    }));
+    let pdfBytes = null;
+    if (window.api) {
+      try {
+        const { PDFDocument } = await import('pdf-lib');
+        const rawBytes = await window.api.invoke('file:read', activeTab.filePath);
+        if (rawBytes) {
+          const pdfDoc = await PDFDocument.load(rawBytes);
+          const form = pdfDoc.getForm();
+          const pages = pdfDoc.getPages();
+
+          // Get active form field IDs on the canvas to handle synchronized deletion
+          const activeFieldIds = new Set();
+          Object.values(fabricInstancesRef.current).forEach(canvas => {
+            canvas.getObjects().forEach(obj => {
+              if (obj.isFormField) {
+                activeFieldIds.add(obj.fieldId);
+              }
+            });
+          });
+
+          // Sync deletion: remove fields in PDF that are no longer on any canvas
+          const fields = form.getFields();
+          fields.forEach(field => {
+            const name = field.getName();
+            if (!activeFieldIds.has(name)) {
+              try {
+                form.removeField(field);
+              } catch (e) {
+                console.warn(`Could not remove field ${name}:`, e);
+              }
+            }
+          });
+
+          // Update or add form fields from Fabric canvases
+          for (const [pageNumStr, canvas] of Object.entries(fabricInstancesRef.current)) {
+            const pageNum = parseInt(pageNumStr, 10);
+            const page = pages[pageNum - 1];
+            if (!page) continue;
+
+            const { height: pageHeight } = page.getSize();
+            const zoom = canvas.getZoom() || 1.0;
+            const objects = canvas.getObjects();
+
+            for (const obj of objects) {
+              if (obj.isFormField) {
+                const x = obj.left / zoom;
+                const y = pageHeight - (obj.top / zoom) - ((obj.height * obj.scaleY) / zoom);
+                const w = (obj.width * obj.scaleX) / zoom;
+                const h = (obj.height * obj.scaleY) / zoom;
+
+                if (obj.fieldType === 'text') {
+                  let textField;
+                  try {
+                    textField = form.getTextField(obj.fieldId);
+                  } catch (e) {
+                    textField = form.createTextField(obj.fieldId);
+                  }
+                  textField.setText(obj.text || obj.value || '');
+                  if (obj.maxLength > 0) {
+                    textField.setMaxLength(obj.maxLength);
+                  }
+                  textField.setRequired(!!obj.required);
+                  
+                  try {
+                    textField.acroField.getWidgets().forEach(widget => textField.acroField.removeWidget(widget));
+                    textField.addToPage(page, { x, y, width: w, height: h });
+                  } catch (err) {
+                    try {
+                      textField.addToPage(page, { x, y, width: w, height: h });
+                    } catch (e2) {}
+                  }
+                } else if (obj.fieldType === 'checkbox') {
+                  let checkBox;
+                  try {
+                    checkBox = form.getCheckBox(obj.fieldId);
+                  } catch (e) {
+                    checkBox = form.createCheckBox(obj.fieldId);
+                  }
+                  if (obj.value) {
+                    checkBox.check();
+                  } else {
+                    checkBox.uncheck();
+                  }
+                  checkBox.setRequired(!!obj.required);
+
+                  try {
+                    checkBox.acroField.getWidgets().forEach(widget => checkBox.acroField.removeWidget(widget));
+                    checkBox.addToPage(page, { x, y, width: w, height: h });
+                  } catch (err) {
+                    try {
+                      checkBox.addToPage(page, { x, y, width: w, height: h });
+                    } catch (e2) {}
+                  }
+                }
+              }
+            }
+          }
+
+          pdfBytes = await pdfDoc.save();
+        }
+      } catch (err) {
+        console.error("Error compiling form fields during save:", err);
+      }
+    }
 
     if (window.api) {
       try {
         const success = await window.api.invoke(IPC_CHANNELS.FILE_SAVE, {
           filePath: activeTab.filePath,
-          annotations: serializedAnnotations,
-          forms: serializedFormData
+          data: pdfBytes,
+          annotations: serializedAnnotations
         });
         if (success) {
           NotificationSystem.success('Save', 'Saved changes successfully.');
@@ -511,6 +618,214 @@ export default function App() {
     }
   };
 
+  const handleExecuteWatermark = async (data) => {
+    if (!activeTab) {
+      NotificationSystem.warning('Watermark', 'Please open a PDF document first.');
+      return;
+    }
+    NotificationSystem.info('Watermark', 'Applying watermark to PDF...');
+    if (window.api) {
+      try {
+        setConversionStatus('Applying watermark...');
+        setShowConversionProgress(true);
+        setConversionProgress(20);
+        
+        const result = await window.api.invoke('pdf:watermark', {
+          filePath: activeTab.filePath,
+          options: data
+        });
+        setConversionProgress(100);
+        
+        if (result) {
+          NotificationSystem.success('Watermark', 'Watermark applied successfully.');
+          if (typeof result === 'string' && result !== activeTab.filePath) {
+            loadPDF(result);
+          }
+        }
+      } catch (err) {
+        NotificationSystem.error('Watermark Error', err.message);
+      } finally {
+        setShowConversionProgress(false);
+        setShowWatermarkDialog(false);
+      }
+    } else {
+      setShowConversionProgress(true);
+      setConversionStatus('Simulating watermark application...');
+      setConversionProgress(30);
+      setTimeout(() => {
+        setConversionProgress(70);
+        setTimeout(() => {
+          setConversionProgress(100);
+          setShowConversionProgress(false);
+          NotificationSystem.success('Watermark (Mock)', 'Watermark applied and saved successfully.');
+          setShowWatermarkDialog(false);
+        }, 800);
+      }, 600);
+    }
+  };
+
+  const handleExecuteHeaderFooter = async (data) => {
+    if (!activeTab) {
+      NotificationSystem.warning('Header & Footer', 'Please open a PDF document first.');
+      return;
+    }
+    NotificationSystem.info('Header & Footer', 'Applying headers & footers to PDF...');
+    if (window.api) {
+      try {
+        setConversionStatus('Adding headers and footers...');
+        setShowConversionProgress(true);
+        setConversionProgress(20);
+        
+        const result = await window.api.invoke('pdf:header-footer', {
+          filePath: activeTab.filePath,
+          options: data
+        });
+        setConversionProgress(100);
+        
+        if (result) {
+          NotificationSystem.success('Header & Footer', 'Headers and footers added successfully.');
+          if (typeof result === 'string' && result !== activeTab.filePath) {
+            loadPDF(result);
+          }
+        }
+      } catch (err) {
+        NotificationSystem.error('Header & Footer Error', err.message);
+      } finally {
+        setShowConversionProgress(false);
+        setShowHeaderFooterDialog(false);
+      }
+    } else {
+      setShowConversionProgress(true);
+      setConversionStatus('Simulating headers & footers...');
+      setConversionProgress(30);
+      setTimeout(() => {
+        setConversionProgress(70);
+        setTimeout(() => {
+          setConversionProgress(100);
+          setShowConversionProgress(false);
+          NotificationSystem.success('Header & Footer (Mock)', 'Headers and footers added successfully.');
+          setShowHeaderFooterDialog(false);
+        }, 800);
+      }, 600);
+    }
+  };
+
+  const handleConvertToPdf = async () => {
+    NotificationSystem.info('Convert to PDF', 'Selecting source document...');
+    if (window.api) {
+      try {
+        const files = await window.api.invoke(IPC_CHANNELS.FILE_OPEN, {
+          title: 'Select Document to Convert',
+          filters: [
+            { name: 'Convertible Files', extensions: ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'png', 'jpg', 'jpeg', 'txt'] }
+          ]
+        });
+        
+        if (files && files.length > 0) {
+          const sourcePath = files[0];
+          setShowConversionProgress(true);
+          setConversionStatus('Converting source file to PDF...');
+          setConversionProgress(10);
+          
+          const timer = setInterval(() => {
+            setConversionProgress(prev => Math.min(prev + 15, 85));
+          }, 400);
+          
+          const destPath = await window.api.invoke(IPC_CHANNELS.PDF_CONVERT_TO_PDF, {
+            filePath: sourcePath
+          });
+          
+          clearInterval(timer);
+          setConversionProgress(100);
+          
+          if (destPath) {
+            NotificationSystem.success('Convert to PDF', 'File converted successfully.');
+            loadPDF(destPath);
+          }
+        }
+      } catch (err) {
+        NotificationSystem.error('Convert Error', err.message);
+      } finally {
+        setShowConversionProgress(false);
+      }
+    } else {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.docx,.xlsx,.pptx,.png,.jpg,.jpeg,.txt';
+      input.onchange = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          setShowConversionProgress(true);
+          setConversionStatus(`Mock converting ${file.name} to PDF...`);
+          setConversionProgress(20);
+          setTimeout(() => {
+            setConversionProgress(60);
+            setTimeout(() => {
+              setConversionProgress(100);
+              setShowConversionProgress(false);
+              NotificationSystem.success('Convert (Mock)', 'Document converted to PDF.');
+              loadMockPDF(file.name.split('.')[0] + '_converted.pdf');
+            }, 800);
+          }, 600);
+        }
+      };
+      input.click();
+    }
+  };
+
+  const handleConvertFromPdf = async () => {
+    if (!activeTab) {
+      NotificationSystem.warning('Convert from PDF', 'Please open a PDF document first.');
+      return;
+    }
+    setShowConvertFromPdfDialog(true);
+  };
+
+  const handleExecuteConvertFromPdf = async () => {
+    setShowConvertFromPdfDialog(false);
+    NotificationSystem.info('Convert from PDF', `Converting PDF to ${convertTargetFormat.toUpperCase()}...`);
+    
+    if (window.api) {
+      try {
+        setShowConversionProgress(true);
+        setConversionStatus(`Converting PDF to ${convertTargetFormat.toUpperCase()}...`);
+        setConversionProgress(10);
+        
+        const timer = setInterval(() => {
+          setConversionProgress(prev => Math.min(prev + 10, 90));
+        }, 300);
+        
+        const result = await window.api.invoke(IPC_CHANNELS.PDF_CONVERT_FROM_PDF, {
+          filePath: activeTab.filePath,
+          format: convertTargetFormat
+        });
+        
+        clearInterval(timer);
+        setConversionProgress(100);
+        
+        if (result) {
+          NotificationSystem.success('Convert from PDF', `File successfully converted to ${convertTargetFormat.toUpperCase()}.`);
+        }
+      } catch (err) {
+        NotificationSystem.error('Convert Error', err.message);
+      } finally {
+        setShowConversionProgress(false);
+      }
+    } else {
+      setShowConversionProgress(true);
+      setConversionStatus(`Converting to ${convertTargetFormat.toUpperCase()} (Mock)...`);
+      setConversionProgress(20);
+      setTimeout(() => {
+        setConversionProgress(75);
+        setTimeout(() => {
+          setConversionProgress(100);
+          setShowConversionProgress(false);
+          NotificationSystem.success('Convert from PDF (Mock)', `Document converted and saved in ${convertTargetFormat.toUpperCase()} format.`);
+        }, 900);
+      }, 700);
+    }
+  };
+
   const handleSaveSettings = async () => {
     if (window.api) {
       await window.api.invoke(IPC_CHANNELS.APP_SETTINGS, {
@@ -638,7 +953,23 @@ export default function App() {
   return (
     <div id="app-container">
       {/* Titlebar */}
-      <Titlebar />
+      <Titlebar
+        onOpenClick={handleOpenAnotherFile}
+        onSaveClick={handleSave}
+        onSaveAsClick={handleSaveAs}
+        onPrintClick={handlePrint}
+        onSettingsClick={() => setShowSettingsDialog(true)}
+        onMergeClick={() => setShowMergeDialog(true)}
+        onSplitClick={() => setShowSplitDialog(true)}
+        onCompressClick={() => setShowCompressDialog(true)}
+        onOcrClick={() => setShowOcrDialog(true)}
+        onSignatureClick={() => setShowSignatureDialog(true)}
+        onWatermarkClick={() => setShowWatermarkDialog(true)}
+        onHeaderFooterClick={() => setShowHeaderFooterDialog(true)}
+        onConvertToPdfClick={handleConvertToPdf}
+        onConvertFromPdfClick={handleConvertFromPdf}
+        hasActiveDoc={!!activeTab}
+      />
 
       {/* Conditionally render toolbar if doc is active */}
       <Toolbar
@@ -709,6 +1040,10 @@ export default function App() {
             onOpenCompressDialog={() => setShowCompressDialog(true)}
             onOpenOcrDialog={() => setShowOcrDialog(true)}
             onOpenSettingsDialog={() => setShowSettingsDialog(true)}
+            onOpenConvertToPdfDialog={handleConvertToPdf}
+            onOpenConvertFromPdfDialog={handleConvertFromPdf}
+            onOpenWatermarkDialog={() => setShowWatermarkDialog(true)}
+            onOpenHeaderFooterDialog={() => setShowHeaderFooterDialog(true)}
           />
         ) : (
           <div style={{ display: 'flex', flex: 1, flexDirection: 'column', overflow: 'hidden' }}>
@@ -1052,6 +1387,74 @@ export default function App() {
             <div className="dialog-footer">
               <button className="btn btn-secondary" onClick={() => setShowSignatureDialog(false)}>Cancel</button>
               <button className="btn btn-primary" onClick={handleSaveSignature}>Apply Signature</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Watermark Dialog */}
+      <WatermarkDialog
+        isOpen={showWatermarkDialog}
+        onClose={() => setShowWatermarkDialog(false)}
+        onExecute={handleExecuteWatermark}
+      />
+
+      {/* Header & Footer Dialog */}
+      <HeaderFooterDialog
+        isOpen={showHeaderFooterDialog}
+        onClose={() => setShowHeaderFooterDialog(false)}
+        onExecute={handleExecuteHeaderFooter}
+      />
+
+      {/* Convert From PDF Dialog */}
+      {showConvertFromPdfDialog && (
+        <div className="dialog-backdrop">
+          <div className="dialog-window" style={{ width: '400px' }}>
+            <div className="dialog-header">
+              <h3>Convert PDF to Format</h3>
+              <button className="dialog-close-btn" onClick={() => setShowConvertFromPdfDialog(false)}>&times;</button>
+            </div>
+            <div className="dialog-body">
+              <div className="form-group">
+                <label htmlFor="target-format-select">Target Format</label>
+                <select
+                  id="target-format-select"
+                  className="form-control"
+                  value={convertTargetFormat}
+                  onChange={(e) => setConvertTargetFormat(e.target.value)}
+                >
+                  <option value="docx">Microsoft Word (.docx)</option>
+                  <option value="xlsx">Microsoft Excel (.xlsx)</option>
+                  <option value="pptx">Microsoft PowerPoint (.pptx)</option>
+                  <option value="png">Images (.png)</option>
+                  <option value="txt">Plain Text (.txt)</option>
+                  <option value="html">HTML Webpage (.html)</option>
+                </select>
+              </div>
+            </div>
+            <div className="dialog-footer">
+              <button className="btn btn-secondary" onClick={() => setShowConvertFromPdfDialog(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleExecuteConvertFromPdf}>Convert Document</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Conversion Progress Overlay */}
+      {showConversionProgress && (
+        <div className="dialog-backdrop" style={{ zIndex: 9999 }}>
+          <div className="dialog-window" style={{ width: '400px' }}>
+            <div className="dialog-header">
+              <h3>Processing File</h3>
+            </div>
+            <div className="dialog-body">
+              <div className="form-group">
+                <label>{conversionStatus}</label>
+                <div style={{ height: '8px', backgroundColor: 'var(--bg-input)', borderRadius: '4px', overflow: 'hidden', margin: '12px 0' }}>
+                  <div style={{ width: `${conversionProgress}%`, height: '100%', backgroundColor: 'var(--primary)', transition: 'width 0.2s' }} />
+                </div>
+                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{conversionProgress}% Complete</span>
+              </div>
             </div>
           </div>
         </div>

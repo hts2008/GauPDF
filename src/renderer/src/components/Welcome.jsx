@@ -9,6 +9,10 @@ export default function Welcome({
   onOpenCompressDialog,
   onOpenOcrDialog,
   onOpenSettingsDialog,
+  onOpenConvertToPdfDialog,
+  onOpenConvertFromPdfDialog,
+  onOpenWatermarkDialog,
+  onOpenHeaderFooterDialog
 }) {
   const [recentFiles, setRecentFiles] = useState([]);
 
@@ -38,13 +42,11 @@ export default function Welcome({
   const handleOpenFileDialog = async () => {
     if (window.api && typeof window.api.invoke === 'function') {
       try {
-        // Just trigger single file open from main process, which will open it in a new window
         await window.api.invoke(IPC_CHANNELS.FILE_OPEN);
       } catch (err) {
         NotificationSystem.error('Open File', 'Error: ' + err.message);
       }
     } else {
-      // browser mock
       const input = document.createElement('input');
       input.type = 'file';
       input.accept = '.pdf';
@@ -95,6 +97,7 @@ export default function Welcome({
 
   const handleRecentClick = (file) => {
     const pathStr = typeof file === 'string' ? file : file.path;
+    const nameStr = typeof file === 'string' ? file.split(/[/\\]/).pop() : (file.name || file.path.split(/[/\\]/).pop());
     if (window.api) {
       window.api.openFileInNewWindow(pathStr);
     } else {
@@ -140,6 +143,31 @@ export default function Welcome({
           <span>Compress PDF</span>
           <p>Reduce document file size</p>
         </div>
+
+        {/* New Conversion Cards */}
+        <div className="quick-action-card" onClick={onOpenConvertToPdfDialog}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span>Convert to PDF</span>
+          <p>Convert Office files & images to PDF</p>
+        </div>
+        <div className="quick-action-card" onClick={onOpenConvertFromPdfDialog}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>Convert from PDF</span>
+          <p>Convert PDF to Word, Excel, or Images</p>
+        </div>
+
+        {/* New Watermark & HeaderFooter Cards */}
+        <div className="quick-action-card" onClick={onOpenWatermarkDialog}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span>Apply Watermark</span>
+          <p>Add text or image watermarks to pages</p>
+        </div>
+        <div className="quick-action-card" onClick={onOpenHeaderFooterDialog}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg>
+          <span>Header & Footer</span>
+          <p>Add headers, footers, & page numbering</p>
+        </div>
+
         <div className="quick-action-card" onClick={onOpenOcrDialog}>
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2"><path d="M4 22V4c0-.5.2-1 .6-1.4C5 2.2 5.5 2 6 2h8l6 6v14c0 .5-.2 1-.6 1.4-.4.4-.9.6-1.4.6H6c-.5 0-1-.2-1.4-.6C4 23 4 22.5 4 22z"/><polyline points="14 2 14 8 20 8"/><path d="M8 13h8"/><path d="M8 17h8"/></svg>
           <span>OCR Extract</span>
@@ -180,7 +208,7 @@ export default function Welcome({
                   </div>
                   <div className="recent-actions">
                     <button className="recent-action-btn remove" onClick={(e) => handleRemoveRecent(e, pathStr)} title="Remove from list">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
                     </button>
                   </div>
                 </div>

@@ -137,10 +137,36 @@ export default function Sidebar({
   }
 
   // RENDER RIGHT SIDEBAR (PROPERTIES INSPECTOR)
+  // RENDER RIGHT SIDEBAR (PROPERTIES INSPECTOR)
   const handlePropertyChange = (newProps) => {
     if (selectedObject) {
-      if (selectedObject.type === 'form') {
-        // Update Form field details
+      if (selectedObject.ref) {
+        const obj = selectedObject.ref;
+        obj.set(newProps);
+
+        // Sync custom properties
+        if (newProps.fieldId !== undefined) obj.fieldId = newProps.fieldId;
+        if (newProps.required !== undefined) obj.required = newProps.required;
+        if (newProps.maxLength !== undefined) obj.maxLength = newProps.maxLength;
+        if (newProps.noteText !== undefined) obj.noteText = newProps.noteText;
+        if (newProps.stampText !== undefined) {
+          obj.stampText = newProps.stampText;
+          const textObj = obj.item(1);
+          if (textObj) textObj.set('text', newProps.stampText.toUpperCase());
+        }
+        if (newProps.value !== undefined) {
+          obj.value = newProps.value;
+          if (obj.fieldType === 'checkbox') {
+            const checkMark = obj.item(1);
+            if (checkMark) checkMark.set('visible', !!newProps.value);
+          } else if (obj.fieldType === 'text') {
+            obj.set('text', newProps.value);
+          }
+        }
+
+        obj.canvas.renderAll();
+        setSelectedObject(prev => ({ ...prev, ...newProps }));
+      } else if (selectedObject.type === 'form') {
         const { field, element } = selectedObject;
         if (newProps.id !== undefined) {
           field.id = newProps.id;
@@ -154,12 +180,13 @@ export default function Sidebar({
           field.height = newProps.height;
           if (element) element.style.height = `${newProps.height}px`;
         }
+        if (newProps.required !== undefined) {
+          field.required = newProps.required;
+        }
+        if (newProps.maxLength !== undefined) {
+          field.maxLength = newProps.maxLength;
+        }
         setSelectedObject({ ...selectedObject });
-      } else if (selectedObject.ref) {
-        // Update Fabric object properties
-        selectedObject.ref.set(newProps);
-        selectedObject.ref.canvas.renderAll();
-        setSelectedObject(prev => ({ ...prev, ...newProps }));
       }
     }
   };
@@ -181,15 +208,34 @@ export default function Sidebar({
         ) : (
           <div className="properties-container" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
             
+            {/* Opacity Control (Shared for all Fabric objects) */}
+            {selectedObject.ref && (
+              <div className="properties-group">
+                <div className="properties-title">General Properties</div>
+                <div className="form-group">
+                  <label>Opacity ({Math.round((selectedObject.opacity !== undefined ? selectedObject.opacity : 1.0) * 100)}%):</label>
+                  <input
+                    type="range"
+                    min="0.1"
+                    max="1.0"
+                    step="0.05"
+                    className="form-control"
+                    value={selectedObject.opacity !== undefined ? selectedObject.opacity : 1.0}
+                    onChange={(e) => handlePropertyChange({ opacity: parseFloat(e.target.value) })}
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Text Properties */}
             {selectedObject.type === 'text' && (
               <div className="properties-group">
                 <div className="properties-title">Text Box</div>
                 <div className="form-group">
                   <label>Text Content:</label>
-                  <input
-                    type="text"
+                  <textarea
                     className="form-control"
+                    rows="3"
                     value={selectedObject.text || ''}
                     onChange={(e) => handlePropertyChange({ text: e.target.value })}
                   />
@@ -208,12 +254,38 @@ export default function Sidebar({
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <input
                       type="color"
-                      value={selectedObject.fill || '#6366f1'}
+                      value={selectedObject.fill || '#000000'}
                       onChange={(e) => handlePropertyChange({ fill: e.target.value })}
                       style={{ border: 'none', padding: 0, width: '32px', height: '32px', background: 'transparent', cursor: 'pointer' }}
                     />
                     <span style={{ fontSize: '12px' }}>{selectedObject.fill}</span>
                   </div>
+                </div>
+                <div className="form-group" style={{ display: 'flex', gap: '10px' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedObject.fontWeight === 'bold'}
+                      onChange={(e) => handlePropertyChange({ fontWeight: e.target.checked ? 'bold' : 'normal' })}
+                    />
+                    <span>Bold</span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedObject.fontStyle === 'italic'}
+                      onChange={(e) => handlePropertyChange({ fontStyle: e.target.checked ? 'italic' : 'normal' })}
+                    />
+                    <span>Italic</span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={!!selectedObject.underline}
+                      onChange={(e) => handlePropertyChange({ underline: e.target.checked })}
+                    />
+                    <span>Underline</span>
+                  </label>
                 </div>
               </div>
             )}
@@ -248,38 +320,161 @@ export default function Sidebar({
               </div>
             )}
 
-            {/* Form Field Properties */}
-            {selectedObject.type === 'form' && (
+            {/* Note Circle Properties */}
+            {selectedObject.type === 'note-circle' && (
               <div className="properties-group">
-                <div className="properties-title">Form Field</div>
+                <div className="properties-title">Note Circle</div>
+                <div className="form-group">
+                  <label>Note Content:</label>
+                  <textarea
+                    className="form-control"
+                    rows="4"
+                    value={selectedObject.noteText || ''}
+                    onChange={(e) => handlePropertyChange({ noteText: e.target.value })}
+                    placeholder="Type note details here..."
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Text Callout Properties */}
+            {selectedObject.type === 'text-callout' && (
+              <div className="properties-group">
+                <div className="properties-title">Text Callout</div>
+                <div className="form-group">
+                  <label>Text Content:</label>
+                  <textarea
+                    className="form-control"
+                    rows="3"
+                    value={selectedObject.text || ''}
+                    onChange={(e) => handlePropertyChange({ text: e.target.value })}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Font Size (px):</label>
+                  <input
+                    type="number"
+                    className="form-control"
+                    value={selectedObject.fontSize || 14}
+                    onChange={(e) => handlePropertyChange({ fontSize: parseInt(e.target.value) || 12 })}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Text Color:</label>
+                  <input
+                    type="color"
+                    value={selectedObject.fill || '#ff0000'}
+                    onChange={(e) => handlePropertyChange({ fill: e.target.value })}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Border Color:</label>
+                  <input
+                    type="color"
+                    value={selectedObject.stroke || '#ff0000'}
+                    onChange={(e) => handlePropertyChange({ stroke: e.target.value })}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Background Color:</label>
+                  <input
+                    type="color"
+                    value={selectedObject.backgroundColor || '#ffffff'}
+                    onChange={(e) => handlePropertyChange({ backgroundColor: e.target.value })}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Stamp Properties */}
+            {selectedObject.type === 'stamp' && (
+              <div className="properties-group">
+                <div className="properties-title">Stamp Details</div>
+                <div className="form-group">
+                  <label>Stamp Content:</label>
+                  <select
+                    className="form-control"
+                    value={selectedObject.stampText || 'APPROVED'}
+                    onChange={(e) => handlePropertyChange({ stampText: e.target.value })}
+                  >
+                    <option value="APPROVED">APPROVED</option>
+                    <option value="REJECTED">REJECTED</option>
+                    <option value="VOID">VOID</option>
+                    <option value="DRAFT">DRAFT</option>
+                    <option value="CONFIDENTIAL">CONFIDENTIAL</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Angle (Rotation):</label>
+                  <input
+                    type="number"
+                    className="form-control"
+                    value={Math.round(selectedObject.angle || 0)}
+                    onChange={(e) => handlePropertyChange({ angle: parseInt(e.target.value) || 0 })}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Form Field Properties (both state-based and Fabric-based) */}
+            {(selectedObject.type === 'form-field' || selectedObject.type === 'form') && (
+              <div className="properties-group">
+                <div className="properties-title">Form Field Inspector</div>
                 <div className="form-group">
                   <label>Field Identifier:</label>
                   <input
                     type="text"
                     className="form-control"
-                    value={selectedObject.field.id || ''}
-                    onChange={(e) => handlePropertyChange({ id: e.target.value })}
+                    value={selectedObject.fieldId || (selectedObject.field ? selectedObject.field.id : '')}
+                    onChange={(e) => handlePropertyChange({ fieldId: e.target.value, id: e.target.value })}
                   />
                 </div>
-                <div className="form-group">
-                  <label>Width (px):</label>
-                  <input
-                    type="number"
-                    className="form-control"
-                    value={selectedObject.field.width || 140}
-                    onChange={(e) => handlePropertyChange({ width: parseInt(e.target.value) || 20 })}
-                    min="10"
-                  />
+                
+                {/* Max Length (Only show for Text fields) */}
+                {(selectedObject.fieldType === 'text' || (selectedObject.field && selectedObject.field.type === 'text')) && (
+                  <div className="form-group">
+                    <label>Max Characters (0 for unlimited):</label>
+                    <input
+                      type="number"
+                      className="form-control"
+                      value={selectedObject.maxLength !== undefined ? selectedObject.maxLength : (selectedObject.field ? selectedObject.field.maxLength || 0 : 0)}
+                      onChange={(e) => handlePropertyChange({ maxLength: parseInt(e.target.value) || 0 })}
+                      min="0"
+                    />
+                  </div>
+                )}
+
+                <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={!!selectedObject.required || (selectedObject.field && !!selectedObject.field.required)}
+                      onChange={(e) => handlePropertyChange({ required: e.target.checked })}
+                      style={{ width: '16px', height: '16px' }}
+                    />
+                    <span>Required Field</span>
+                  </label>
                 </div>
+
                 <div className="form-group">
-                  <label>Height (px):</label>
-                  <input
-                    type="number"
-                    className="form-control"
-                    value={selectedObject.field.height || 24}
-                    onChange={(e) => handlePropertyChange({ height: parseInt(e.target.value) || 10 })}
-                    min="10"
-                  />
+                  <label>Current Value:</label>
+                  {selectedObject.fieldType === 'checkbox' || (selectedObject.field && selectedObject.field.type === 'checkbox') ? (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={!!selectedObject.value || (selectedObject.field && !!selectedObject.field.value)}
+                        onChange={(e) => handlePropertyChange({ value: e.target.checked })}
+                      />
+                      <span>Checked State</span>
+                    </label>
+                  ) : (
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={selectedObject.value || (selectedObject.field ? selectedObject.field.value || '' : '')}
+                      onChange={(e) => handlePropertyChange({ value: e.target.value })}
+                    />
+                  )}
                 </div>
               </div>
             )}

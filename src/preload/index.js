@@ -21,6 +21,12 @@ contextBridge.exposeInMainWorld('api', {
   // Multi-window operations
   openFileInNewWindow: (filePath) => ipcRenderer.invoke('app:open-file-window', filePath),
 
+  // LibreOffice document conversion and styling
+  convertToPdf: (payload) => ipcRenderer.invoke('pdf:convert-to-pdf', payload),
+  convertFromPdf: (payload) => ipcRenderer.invoke('pdf:convert-from-pdf', payload),
+  addWatermark: (payload) => ipcRenderer.invoke('pdf:add-watermark', payload),
+  addHeaderFooter: (payload) => ipcRenderer.invoke('pdf:add-header-footer', payload),
+
   // Basic IPC utilities (highly compatible with old renderer code)
   send: (channel, ...args) => {
     ipcRenderer.send(channel, ...args);
