@@ -1,5 +1,5 @@
-// src/main/updater.js
-import { autoUpdater } from 'electron-updater';
+import pkg from 'electron-updater';
+const { autoUpdater } = pkg;
 import { BrowserWindow, app } from 'electron';
 
 /**

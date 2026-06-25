@@ -342,8 +342,8 @@ export function registerIpcHandlers() {
   });
 
   ipcMain.handle('app:quit-and-install', async () => {
-    console.log('[IPC] app:quit-and-install requested');
-    const { autoUpdater } = await import('electron-updater');
+    const { default: pkg } = await import('electron-updater');
+    const autoUpdater = pkg.autoUpdater;
     autoUpdater.quitAndInstall();
   });
 }
