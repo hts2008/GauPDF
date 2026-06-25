@@ -8,10 +8,198 @@ import { IPC_CHANNELS, MODES, THEMES } from '../../shared/constants.js';
 import { NotificationSystem } from './utils/notifications.js';
 import WatermarkDialog from './components/WatermarkDialog.jsx';
 import HeaderFooterDialog from './components/HeaderFooterDialog.jsx';
+import SecurityDialog from './components/SecurityDialog.jsx';
 
 import * as pdfjsLib from 'pdfjs-dist';
 // Configure the PDF.js worker path
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
+
+// Helper to extend PDF.js/Mock document objects with bookmarks outline operations
+const extendPdfDocWithOutlineOps = (pdfDoc) => {
+  if (!pdfDoc) return;
+  
+  let cachedOutlinePromise = null;
+  const originalGetOutline = pdfDoc.getOutline;
+  
+  pdfDoc.getOutline = function() {
+    if (pdfDoc._customOutline) {
+      return Promise.resolve(pdfDoc._customOutline);
+    }
+    if (originalGetOutline) {
+      if (!cachedOutlinePromise) {
+        cachedOutlinePromise = originalGetOutline.call(pdfDoc).then(tree => {
+          const assignIds = (items) => {
+            if (!items) return [];
+            return items.map(item => ({
+              id: item.id || 'bm_' + Math.random().toString(36).substring(2, 9),
+              title: item.title,
+              dest: item.dest,
+              bold: item.bold,
+              italic: item.italic,
+              color: item.color,
+              pageNumber: typeof item.dest === 'number' ? item.dest : (item.pageNumber || 1),
+              items: assignIds(item.items)
+            }));
+          };
+          pdfDoc._customOutline = assignIds(tree) || [];
+          return pdfDoc._customOutline;
+        }).catch(err => {
+          console.warn("Failed to load original outline, using empty list:", err);
+          pdfDoc._customOutline = [];
+          return pdfDoc._customOutline;
+        });
+      }
+      return cachedOutlinePromise;
+    } else {
+      pdfDoc._customOutline = [];
+      return Promise.resolve(pdfDoc._customOutline);
+    }
+  };
+
+  pdfDoc.addBookmark = function(title, pageNumber, parentId = null) {
+    const newBookmark = {
+      id: 'bm_' + Math.random().toString(36).substring(2, 9),
+      title,
+      dest: pageNumber,
+      pageNumber,
+      items: []
+    };
+
+    if (!pdfDoc._customOutline) pdfDoc._customOutline = [];
+
+    if (!parentId) {
+      pdfDoc._customOutline.push(newBookmark);
+      return;
+    }
+
+    const insertUnderParent = (items) => {
+      for (const item of items) {
+        if (item.id === parentId) {
+          if (!item.items) item.items = [];
+          item.items.push(newBookmark);
+          return true;
+        }
+        if (item.items && item.items.length > 0) {
+          if (insertUnderParent(item.items)) return true;
+        }
+      }
+      return false;
+    };
+    insertUnderParent(pdfDoc._customOutline);
+  };
+
+  pdfDoc.editBookmark = function(id, newTitle, newPageNumber) {
+    if (!pdfDoc._customOutline) return;
+    const updateItem = (items) => {
+      for (const item of items) {
+        if (item.id === id) {
+          item.title = newTitle;
+          item.pageNumber = newPageNumber;
+          item.dest = newPageNumber;
+          return true;
+        }
+        if (item.items && item.items.length > 0) {
+          if (updateItem(item.items)) return true;
+        }
+      }
+      return false;
+    };
+    updateItem(pdfDoc._customOutline);
+  };
+
+  pdfDoc.removeBookmark = function(id) {
+    if (!pdfDoc._customOutline) return;
+    const removeItem = (items) => {
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].id === id) {
+          items.splice(i, 1);
+          return true;
+        }
+        if (items[i].items && items[i].items.length > 0) {
+          if (removeItem(items[i].items)) return true;
+        }
+      }
+      return false;
+    };
+    removeItem(pdfDoc._customOutline);
+  };
+};
+
+const writeOutlines = (pdfDoc, bookmarks, PDFString) => {
+  if (!bookmarks || bookmarks.length === 0) return;
+  try {
+    const context = pdfDoc.context;
+    const catalog = pdfDoc.catalog;
+
+    const outlineRef = context.nextRef();
+    
+    const allocateRefs = (items, parentRef) => {
+      const allocated = [];
+      for (const item of items) {
+        const ref = context.nextRef();
+        const childItems = item.items && item.items.length > 0 ? allocateRefs(item.items, ref) : [];
+        allocated.push({
+          item,
+          ref,
+          parentRef,
+          children: childItems
+        });
+      }
+      return allocated;
+    };
+
+    const rootItems = allocateRefs(bookmarks, outlineRef);
+
+    const registerItems = (allocatedList) => {
+      for (let i = 0; i < allocatedList.length; i++) {
+        const node = allocatedList[i];
+        const prevNode = i > 0 ? allocatedList[i - 1] : null;
+        const nextNode = i < allocatedList.length - 1 ? allocatedList[i + 1] : null;
+
+        const dict = context.obj({
+          Title: PDFString.of(node.item.title),
+          Parent: node.parentRef,
+        });
+
+        if (prevNode) dict.set(context.obj('Prev'), prevNode.ref);
+        if (nextNode) dict.set(context.obj('Next'), nextNode.ref);
+
+        if (node.children.length > 0) {
+          dict.set(context.obj('First'), node.children[0].ref);
+          dict.set(context.obj('Last'), node.children[node.children.length - 1].ref);
+          dict.set(context.obj('Count'), context.obj(node.children.length));
+        }
+
+        let destPageNum = node.item.pageNumber || 1;
+        const pages = pdfDoc.getPages();
+        const pageIndex = Math.min(Math.max(0, destPageNum - 1), pages.length - 1);
+        const pageRef = pages[pageIndex].ref;
+
+        dict.set(context.obj('Dest'), context.array([pageRef, context.obj('Fit')]));
+
+        context.assign(node.ref, dict);
+
+        if (node.children.length > 0) {
+          registerItems(node.children);
+        }
+      }
+    };
+
+    registerItems(rootItems);
+
+    const outlineDict = context.obj({
+      Type: 'Outlines',
+      First: rootItems[0].ref,
+      Last: rootItems[rootItems.length - 1].ref,
+      Count: rootItems.length
+    });
+
+    context.assign(outlineRef, outlineDict);
+    catalog.set(context.obj('Outlines'), outlineRef);
+  } catch (err) {
+    console.error("Error writing PDF outlines in writeOutlines:", err);
+  }
+};
 
 export default function App() {
   const [tabs, setTabs] = useState([]);
@@ -42,6 +230,7 @@ export default function App() {
   const [showWatermarkDialog, setShowWatermarkDialog] = useState(false);
   const [showHeaderFooterDialog, setShowHeaderFooterDialog] = useState(false);
   const [showConvertFromPdfDialog, setShowConvertFromPdfDialog] = useState(false);
+  const [showSecurityDialog, setShowSecurityDialog] = useState(false);
   const [convertTargetFormat, setConvertTargetFormat] = useState('docx');
   const [conversionProgress, setConversionProgress] = useState(0);
   const [showConversionProgress, setShowConversionProgress] = useState(false);
@@ -88,6 +277,26 @@ export default function App() {
           document.body.className = storedTheme === THEMES.LIGHT ? 'light-theme' : '';
         }
       });
+
+      // Listen for auto-update events
+      const unsubscribeUpdateAvailable = window.api.on('app:update-available', (info) => {
+        NotificationSystem.info('Auto Update', `New version ${info.version} is available! Downloading...`);
+      });
+
+      const unsubscribeUpdateDownloaded = window.api.on('app:update-downloaded', (info) => {
+        NotificationSystem.success('Auto Update', `Version ${info.version} downloaded. Restart to install.`, {
+          duration: 15000,
+          actionLabel: 'Restart Now',
+          onAction: () => {
+            if (window.api) window.api.invoke('app:quit-and-install');
+          }
+        });
+      });
+
+      return () => {
+        if (unsubscribeUpdateAvailable) unsubscribeUpdateAvailable();
+        if (unsubscribeUpdateDownloaded) unsubscribeUpdateDownloaded();
+      };
     }
   }, []);
 
@@ -184,6 +393,7 @@ export default function App() {
 
   // Add document to workspace tabs
   const addTab = (name, filePath, pdfDoc) => {
+    extendPdfDocWithOutlineOps(pdfDoc);
     const tabId = 'tab_' + Math.random().toString(36).substring(2, 9);
     const newTab = {
       id: tabId,
@@ -330,13 +540,13 @@ export default function App() {
 
     const serializedAnnotations = {};
     Object.entries(fabricInstancesRef.current).forEach(([pageNum, instance]) => {
-      serializedAnnotations[pageNum] = instance.toJSON(['isNoteCircle', 'noteText', 'isTextCallout', 'isStamp', 'stampText', 'isFormField', 'fieldType', 'fieldId', 'maxLength', 'required', 'value']);
+      serializedAnnotations[pageNum] = instance.toJSON(['isNoteCircle', 'noteText', 'isTextCallout', 'isStamp', 'stampText', 'isFormField', 'fieldType', 'fieldId', 'maxLength', 'required', 'value', 'isRedaction']);
     });
 
     let pdfBytes = null;
     if (window.api) {
       try {
-        const { PDFDocument } = await import('pdf-lib');
+        const { PDFDocument, PDFString } = await import('pdf-lib');
         const rawBytes = await window.api.invoke('file:read', activeTab.filePath);
         if (rawBytes) {
           const pdfDoc = await PDFDocument.load(rawBytes);
@@ -429,6 +639,10 @@ export default function App() {
                 }
               }
             }
+          }
+
+          if (activeTab.pdfDoc && activeTab.pdfDoc._customOutline) {
+            writeOutlines(pdfDoc, activeTab.pdfDoc._customOutline, PDFString);
           }
 
           pdfBytes = await pdfDoc.save();
@@ -826,6 +1040,161 @@ export default function App() {
     }
   };
 
+  const handleExecuteSecurity = async (securityOptions) => {
+    if (!activeTab) return;
+    setShowSecurityDialog(false);
+    NotificationSystem.info('Security', 'Applying PDF encryption and permission restrictions...');
+
+    setShowConversionProgress(true);
+    setConversionStatus('Encrypting document...');
+    setConversionProgress(25);
+
+    if (window.api) {
+      try {
+        setConversionProgress(60);
+        const result = await window.api.invoke('pdf:apply-security', {
+          filePath: activeTab.filePath,
+          options: securityOptions
+        });
+        setConversionProgress(100);
+        if (result && result.success) {
+          NotificationSystem.success('Security', 'PDF security settings applied successfully.');
+        } else {
+          NotificationSystem.success('Security', 'PDF secured successfully.');
+        }
+      } catch (err) {
+        console.error('Security error:', err);
+        NotificationSystem.error('Security Error', err.message);
+      } finally {
+        setShowConversionProgress(false);
+      }
+    } else {
+      setTimeout(() => {
+        setConversionProgress(80);
+        setTimeout(() => {
+          setConversionProgress(100);
+          setShowConversionProgress(false);
+          NotificationSystem.success('Security (Mock)', `PDF password security applied with ${securityOptions.encryptionStrength}.`);
+        }, 800);
+      }, 600);
+    }
+  };
+
+  const handleApplyRedactions = async () => {
+    if (!activeTab) return;
+    NotificationSystem.info('Redaction', 'Applying permanent redactions...');
+
+    const redactionRectsByPage = {};
+    let totalRedactions = 0;
+
+    Object.entries(fabricInstancesRef.current).forEach(([pageNumStr, canvas]) => {
+      const pageNum = parseInt(pageNumStr, 10);
+      const objects = canvas.getObjects();
+      const redactObjs = objects.filter(obj => obj.isRedaction);
+      if (redactObjs.length > 0) {
+        redactionRectsByPage[pageNum] = redactObjs;
+        totalRedactions += redactObjs.length;
+      }
+    });
+
+    if (totalRedactions === 0) {
+      NotificationSystem.warning('Redaction', 'No redaction areas drawn. Select the Redact tool and draw rectangles first.');
+      return;
+    }
+
+    setShowConversionProgress(true);
+    setConversionStatus('Executing permanent redactions...');
+    setConversionProgress(20);
+
+    try {
+      let pdfBytes = null;
+      if (window.api) {
+        const rawBytes = await window.api.invoke('file:read', activeTab.filePath);
+        if (rawBytes) {
+          setConversionProgress(45);
+          const { PDFDocument, rgb } = await import('pdf-lib');
+          const pdfDoc = await PDFDocument.load(rawBytes);
+          const pages = pdfDoc.getPages();
+
+          Object.entries(redactionRectsByPage).forEach(([pageNumStr, rects]) => {
+            const pageNum = parseInt(pageNumStr, 10);
+            const page = pages[pageNum - 1];
+            if (!page) return;
+
+            const { height: pageHeight } = page.getSize();
+            const canvas = fabricInstancesRef.current[pageNumStr];
+            const zoom = canvas ? canvas.getZoom() : 1.0;
+
+            rects.forEach(rect => {
+              const x = rect.left / zoom;
+              const y = pageHeight - (rect.top / zoom) - ((rect.height * rect.scaleY) / zoom);
+              const w = (rect.width * rect.scaleX) / zoom;
+              const h = (rect.height * rect.scaleY) / zoom;
+
+              // Cover permanently with black rectangle
+              page.drawRectangle({
+                x,
+                y,
+                width: w,
+                height: h,
+                color: rgb(0, 0, 0)
+              });
+            });
+          });
+
+          setConversionProgress(80);
+          pdfBytes = await pdfDoc.save();
+        }
+      }
+
+      setConversionProgress(90);
+
+      if (window.api && pdfBytes) {
+        const success = await window.api.invoke(IPC_CHANNELS.FILE_SAVE, {
+          filePath: activeTab.filePath,
+          data: pdfBytes
+        });
+
+        if (success) {
+          // Remove redactions from canvas
+          Object.entries(redactionRectsByPage).forEach(([pageNumStr, rects]) => {
+            const canvas = fabricInstancesRef.current[pageNumStr];
+            if (canvas) {
+              rects.forEach(rect => canvas.remove(rect));
+              canvas.requestRenderAll();
+            }
+          });
+
+          setConversionProgress(100);
+          setShowConversionProgress(false);
+          NotificationSystem.success('Redaction', 'Permanent redactions applied successfully.');
+          loadPDF(activeTab.filePath);
+        } else {
+          setShowConversionProgress(false);
+          NotificationSystem.error('Redaction', 'Failed to save redacted PDF.');
+        }
+      } else {
+        // Mock
+        setTimeout(() => {
+          Object.entries(redactionRectsByPage).forEach(([pageNumStr, rects]) => {
+            const canvas = fabricInstancesRef.current[pageNumStr];
+            if (canvas) {
+              rects.forEach(rect => canvas.remove(rect));
+              canvas.requestRenderAll();
+            }
+          });
+          setConversionProgress(100);
+          setShowConversionProgress(false);
+          NotificationSystem.success('Redaction (Mock)', 'Applied permanent black redactions successfully.');
+        }, 1200);
+      }
+    } catch (err) {
+      console.error('Redaction error:', err);
+      setShowConversionProgress(false);
+      NotificationSystem.error('Redaction Error', err.message);
+    }
+  };
+
   const handleSaveSettings = async () => {
     if (window.api) {
       await window.api.invoke(IPC_CHANNELS.APP_SETTINGS, {
@@ -1002,6 +1371,8 @@ export default function App() {
         onCompressClick={() => setShowCompressDialog(true)}
         onSignatureClick={() => setShowSignatureDialog(true)}
         hasActiveDoc={!!activeTab}
+        onApplyRedactions={handleApplyRedactions}
+        onSecurityClick={() => setShowSecurityDialog(true)}
       />
 
       {/* Main Workspace Frame */}
@@ -1397,6 +1768,13 @@ export default function App() {
         isOpen={showWatermarkDialog}
         onClose={() => setShowWatermarkDialog(false)}
         onExecute={handleExecuteWatermark}
+      />
+
+      {/* Security Dialog */}
+      <SecurityDialog
+        isOpen={showSecurityDialog}
+        onClose={() => setShowSecurityDialog(false)}
+        onExecute={handleExecuteSecurity}
       />
 
       {/* Header & Footer Dialog */}

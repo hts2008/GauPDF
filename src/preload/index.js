@@ -27,6 +27,12 @@ contextBridge.exposeInMainWorld('api', {
   addWatermark: (payload) => ipcRenderer.invoke('pdf:add-watermark', payload),
   addHeaderFooter: (payload) => ipcRenderer.invoke('pdf:add-header-footer', payload),
 
+  // Phase 3 Features (Encryption, Bookmarks, Redactions)
+  encryptPdf: (payload) => ipcRenderer.invoke('pdf:encrypt', payload),
+  getBookmarks: (payload) => ipcRenderer.invoke('pdf:get-bookmarks', payload),
+  setBookmarks: (payload) => ipcRenderer.invoke('pdf:set-bookmarks', payload),
+  applyRedactions: (payload) => ipcRenderer.invoke('pdf:redact', payload),
+
   // Basic IPC utilities (highly compatible with old renderer code)
   send: (channel, ...args) => {
     ipcRenderer.send(channel, ...args);

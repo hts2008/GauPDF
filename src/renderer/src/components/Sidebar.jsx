@@ -66,6 +66,81 @@ export default function Sidebar({
     }
   }, [pdfDoc]);
 
+  const handleAddBookmark = () => {
+    const title = prompt('Enter bookmark title:', `Page ${currentPage}`);
+    if (title && title.trim()) {
+      const trimmedTitle = title.trim();
+      if (pdfDoc && pdfDoc.addBookmark) {
+        pdfDoc.addBookmark(trimmedTitle, currentPage);
+        pdfDoc.getOutline().then(tree => {
+          setOutline([...tree]);
+        });
+      } else {
+        const newBookmark = {
+          id: 'bm_' + Math.random().toString(36).substring(2, 9),
+          title: trimmedTitle,
+          dest: currentPage,
+          pageNumber: currentPage,
+          items: []
+        };
+        setOutline(prev => [...prev, newBookmark]);
+      }
+    }
+  };
+
+  const handleEditBookmark = (item, e) => {
+    e.stopPropagation();
+    const newTitle = prompt('Edit bookmark title:', item.title);
+    if (newTitle && newTitle.trim()) {
+      const trimmedTitle = newTitle.trim();
+      const pageStr = prompt('Enter page number:', item.pageNumber || item.dest || 1);
+      const pageNum = parseInt(pageStr, 10) || 1;
+      
+      if (pdfDoc && pdfDoc.editBookmark) {
+        pdfDoc.editBookmark(item.id, trimmedTitle, pageNum);
+        pdfDoc.getOutline().then(tree => {
+          setOutline([...tree]);
+        });
+      } else {
+        const updateItems = (list) => {
+          return list.map(x => {
+            if (x === item || (x.id && x.id === item.id)) {
+              return { ...x, title: trimmedTitle, dest: pageNum, pageNumber: pageNum };
+            }
+            if (x.items && x.items.length > 0) {
+              return { ...x, items: updateItems(x.items) };
+            }
+            return x;
+          });
+        };
+        setOutline(prev => updateItems(prev));
+      }
+    }
+  };
+
+  const handleDeleteBookmark = (item, e) => {
+    e.stopPropagation();
+    if (confirm(`Are you sure you want to delete bookmark "${item.title}"?`)) {
+      if (pdfDoc && pdfDoc.removeBookmark) {
+        pdfDoc.removeBookmark(item.id);
+        pdfDoc.getOutline().then(tree => {
+          setOutline([...tree]);
+        });
+      } else {
+        const removeItems = (list) => {
+          return list.filter(x => {
+            if (x === item || (x.id && x.id === item.id)) return false;
+            if (x.items && x.items.length > 0) {
+              x.items = removeItems(x.items);
+            }
+            return true;
+          });
+        };
+        setOutline(prev => removeItems(prev));
+      }
+    }
+  };
+
   if (!isOpen) return null;
 
   // RENDER LEFT SIDEBAR
@@ -73,8 +148,41 @@ export default function Sidebar({
     const renderOutlineItems = (items) => {
       return items.map((item, idx) => (
         <div key={idx} style={{ paddingLeft: '8px' }}>
-          <div className="outline-item" onClick={() => onGoToDestination(item.dest)}>
-            {item.title}
+          <div 
+            className="outline-item" 
+            style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'space-between', 
+              padding: '6px 8px', 
+              borderRadius: '4px', 
+              cursor: 'pointer', 
+              gap: '8px',
+              fontSize: '13px'
+            }} 
+            onClick={() => onGoToDestination(item.dest)}
+          >
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+              {item.title}
+            </span>
+            <div className="bookmark-actions" style={{ display: 'flex', gap: '4px' }}>
+              <button
+                className="btn btn-icon"
+                style={{ width: '22px', height: '22px', padding: 0, minWidth: 0, opacity: 0.6, border: 'none', background: 'transparent' }}
+                onClick={(e) => handleEditBookmark(item, e)}
+                title="Edit bookmark title"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+              </button>
+              <button
+                className="btn btn-icon"
+                style={{ width: '22px', height: '22px', padding: 0, minWidth: 0, opacity: 0.6, border: 'none', background: 'transparent' }}
+                onClick={(e) => handleDeleteBookmark(item, e)}
+                title="Delete bookmark"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
           </div>
           {item.items && item.items.length > 0 && renderOutlineItems(item.items)}
         </div>
@@ -120,14 +228,24 @@ export default function Sidebar({
             </div>
           )}
           {activeTab === 'outline' && (
-            <div className="outline-tree">
-              {outline.length === 0 ? (
-                <div style={{ padding: '20px 10px', color: 'var(--text-muted)', textAlign: 'center' }}>
-                  No bookmarks outline structure available.
-                </div>
-              ) : (
-                renderOutlineItems(outline)
-              )}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', height: '100%' }}>
+              <button
+                className="btn btn-primary"
+                onClick={handleAddBookmark}
+                style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '6px 12px', fontSize: '12px' }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                <span>Add Bookmark</span>
+              </button>
+              <div className="outline-tree" style={{ flex: 1, overflowY: 'auto' }}>
+                {outline.length === 0 ? (
+                  <div style={{ padding: '20px 10px', color: 'var(--text-muted)', textAlign: 'center', fontSize: '13px' }}>
+                    No bookmarks outline structure available.
+                  </div>
+                ) : (
+                  renderOutlineItems(outline)
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -412,6 +530,17 @@ export default function Sidebar({
                     value={Math.round(selectedObject.angle || 0)}
                     onChange={(e) => handlePropertyChange({ angle: parseInt(e.target.value) || 0 })}
                   />
+                </div>
+              </div>
+            )}
+
+            {/* Redaction Properties */}
+            {selectedObject.type === 'redaction' && (
+              <div className="properties-group">
+                <div className="properties-title" style={{ color: '#ef4444' }}>Redaction Area</div>
+                <div style={{ color: 'var(--text-secondary)', fontSize: '12px', display: 'flex', flexDirection: 'column', gap: '8px', lineHeight: '1.4' }}>
+                  <span>This area is marked for <strong>permanent redaction</strong>.</span>
+                  <span>Click <strong>"Apply Redactions"</strong> in the toolbar to burn a solid black rectangle into the PDF and permanently hide the text and images underneath.</span>
                 </div>
               </div>
             )}

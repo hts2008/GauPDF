@@ -15,7 +15,11 @@ import {
   compressPDF,
   executeOCR,
   addWatermark,
-  addHeaderFooter
+  addHeaderFooter,
+  encryptPdf,
+  getBookmarks,
+  setBookmarks,
+  applyRedactions
 } from './file-manager.js';
 import { convertToPdf, convertFromPdf } from './libreoffice-service.js';
 import { getPrinters, printExecute, printToPDF } from './print-manager.js';
@@ -187,6 +191,30 @@ export function registerIpcHandlers() {
     return await addHeaderFooter(filePath, options, outputPath);
   });
 
+  ipcMain.handle('pdf:encrypt', async (event, payload) => {
+    const { filePath, options } = payload || {};
+    console.log(`[IPC] pdf:encrypt requested for: ${filePath}`);
+    return await encryptPdf(filePath, options);
+  });
+
+  ipcMain.handle('pdf:get-bookmarks', async (event, payload) => {
+    const { filePath } = payload || {};
+    console.log(`[IPC] pdf:get-bookmarks requested for: ${filePath}`);
+    return await getBookmarks(filePath);
+  });
+
+  ipcMain.handle('pdf:set-bookmarks', async (event, payload) => {
+    const { filePath, bookmarks, outputPath } = payload || {};
+    console.log(`[IPC] pdf:set-bookmarks requested for: ${filePath}`);
+    return await setBookmarks(filePath, bookmarks, outputPath);
+  });
+
+  ipcMain.handle('pdf:redact', async (event, payload) => {
+    const { filePath, redactions, outputPath } = payload || {};
+    console.log(`[IPC] pdf:redact requested for: ${filePath}`);
+    return await applyRedactions(filePath, redactions, outputPath);
+  });
+
   // --- OCR Operations ---
   ipcMain.handle(IPC_CHANNELS.OCR_EXECUTE, async (event, payload) => {
     const { imageBufferOrPath, language } = payload || {};
@@ -305,5 +333,17 @@ export function registerIpcHandlers() {
   ipcMain.handle('file:check-recovery', async () => {
     console.log('[IPC] file:check-recovery requested');
     return await checkRecoveryFiles();
+  });
+
+  ipcMain.handle('pdf:apply-security', async (event, payload) => {
+    const { filePath, options } = payload || {};
+    console.log(`[IPC] pdf:apply-security requested for: ${filePath}`);
+    return await encryptPdf(filePath, options);
+  });
+
+  ipcMain.handle('app:quit-and-install', async () => {
+    console.log('[IPC] app:quit-and-install requested');
+    const { autoUpdater } = await import('electron-updater');
+    autoUpdater.quitAndInstall();
   });
 }

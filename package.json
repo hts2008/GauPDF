@@ -13,6 +13,7 @@
     "dist": "electron-vite build && electron-builder"
   },
   "dependencies": {
+    "@pdfsmaller/pdf-encrypt-lite": "^1.0.2",
     "chokidar": "^3.6.0",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.1.7",

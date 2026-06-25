@@ -3,7 +3,20 @@ import { app, dialog } from 'electron';
 import fs from 'fs/promises';
 import path from 'path';
 import chokidar from 'chokidar';
-import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
+import {
+  PDFDocument,
+  StandardFonts,
+  rgb,
+  degrees,
+  PDFName,
+  PDFNumber,
+  PDFArray,
+  PDFNull,
+  PDFDict,
+  PDFRef,
+  PDFHexString
+} from 'pdf-lib';
+import { encryptPDF } from '@pdfsmaller/pdf-encrypt-lite';
 import { createWorker } from 'tesseract.js';
 import store from './store.js';
 import { IPC_CHANNELS } from '../shared/constants.js';
@@ -573,6 +586,295 @@ export async function addWatermark(filePath, options = {}, outputPath = null) {
 export async function addHeaderFooter(filePath, options = {}, outputPath = null) {
   const bytes = await fs.readFile(filePath);
   const modifiedBytes = await applyHeaderFooter(bytes, options);
+  const targetPath = outputPath || filePath;
+  await fs.writeFile(targetPath, Buffer.from(modifiedBytes));
+  return { success: true, filePath: targetPath };
+}
+
+/**
+ * Encrypt a PDF file with user and owner passwords.
+ */
+export async function encryptPdf(filePath, options = {}) {
+  const bytes = await fs.readFile(filePath);
+  const userPassword = options.userPassword || '';
+  const ownerPassword = options.ownerPassword || '';
+  
+  // Encrypt the bytes
+  const encryptedBytes = await encryptPDF(bytes, userPassword, ownerPassword);
+  
+  const targetPath = options.outputPath || filePath;
+  await fs.writeFile(targetPath, Buffer.from(encryptedBytes));
+  return { success: true, filePath: targetPath };
+}
+
+/**
+ * Read outline bookmarks from a PDF file
+ */
+export async function getBookmarks(filePath) {
+  const bytes = await fs.readFile(filePath);
+  const pdfDoc = await PDFDocument.load(bytes);
+  
+  const pages = pdfDoc.getPages();
+  const pageRefsMap = new Map();
+  pages.forEach((page, index) => {
+    if (page.ref) {
+      pageRefsMap.set(page.ref.toString(), index);
+    }
+  });
+
+  const outlinesRef = pdfDoc.catalog.get(PDFName.of('Outlines'));
+  if (!outlinesRef) return [];
+
+  const outlinesDict = pdfDoc.context.lookup(outlinesRef);
+  if (!(outlinesDict instanceof PDFDict)) return [];
+
+  const firstRef = outlinesDict.get(PDFName.of('First'));
+  return traverseOutlineItems(firstRef, pdfDoc.context, pageRefsMap);
+}
+
+function traverseOutlineItems(firstRef, context, pageRefsMap) {
+  const items = [];
+  let currentRef = firstRef;
+
+  while (currentRef && currentRef instanceof PDFRef) {
+    const dict = context.lookup(currentRef);
+    if (!(dict instanceof PDFDict)) break;
+
+    const titleObj = dict.get(PDFName.of('Title'));
+    let title = '';
+    if (titleObj) {
+      title = titleObj.decodeText ? titleObj.decodeText() : titleObj.toString();
+    }
+
+    // Find destination page index
+    let pageIndex = -1;
+    const destObj = dict.get(PDFName.of('Dest'));
+    const actionObj = dict.get(PDFName.of('A'));
+
+    let targetPageRef = null;
+    if (destObj) {
+      const resolvedDest = context.lookup(destObj);
+      if (resolvedDest instanceof PDFRef) {
+        targetPageRef = resolvedDest;
+      } else if (resolvedDest instanceof PDFArray) {
+        targetPageRef = resolvedDest.get(0);
+      }
+    } else if (actionObj instanceof PDFDict) {
+      const s = actionObj.get(PDFName.of('S'));
+      if (s && s.key === '/GoTo') {
+        const d = actionObj.get(PDFName.of('D'));
+        const resolvedD = context.lookup(d);
+        if (resolvedD instanceof PDFRef) {
+          targetPageRef = resolvedD;
+        } else if (resolvedD instanceof PDFArray) {
+          targetPageRef = resolvedD.get(0);
+        }
+      }
+    }
+
+    if (targetPageRef instanceof PDFRef) {
+      pageIndex = pageRefsMap.get(targetPageRef.toString()) ?? -1;
+    }
+
+    const item = {
+      title,
+      pageIndex,
+      children: []
+    };
+
+    const childFirstRef = dict.get(PDFName.of('First'));
+    if (childFirstRef instanceof PDFRef) {
+      item.children = traverseOutlineItems(childFirstRef, context, pageRefsMap);
+    }
+
+    items.push(item);
+
+    // Go to next sibling
+    currentRef = dict.get(PDFName.of('Next'));
+  }
+
+  return items;
+}
+
+/**
+ * Write outline bookmarks to a PDF file
+ */
+export async function setBookmarks(filePath, bookmarks = [], outputPath = null) {
+  const bytes = await fs.readFile(filePath);
+  const pdfDoc = await PDFDocument.load(bytes);
+  const context = pdfDoc.context;
+  const pages = pdfDoc.getPages();
+
+  // Remove existing Outlines from Catalog
+  pdfDoc.catalog.delete(PDFName.of('Outlines'));
+
+  if (bookmarks && bookmarks.length > 0) {
+    // Helper to assign refs to all bookmarks nodes
+    const assignRefs = (node) => {
+      node.ref = context.nextRef();
+      if (node.children && node.children.length > 0) {
+        node.children.forEach(assignRefs);
+      }
+    };
+    bookmarks.forEach(assignRefs);
+
+    // Helper to build outline dicts
+    const buildOutlineDicts = (nodes, parentRef) => {
+      for (let i = 0; i < nodes.length; i++) {
+        const node = nodes[i];
+        const ref = node.ref;
+
+        const prevNode = nodes[i - 1];
+        const nextNode = nodes[i + 1];
+
+        const map = new Map();
+        map.set(PDFName.of('Title'), PDFHexString.fromText(node.title));
+        map.set(PDFName.of('Parent'), parentRef);
+
+        if (prevNode) {
+          map.set(PDFName.of('Prev'), prevNode.ref);
+        }
+        if (nextNode) {
+          map.set(PDFName.of('Next'), nextNode.ref);
+        }
+
+        const page = pages[node.pageIndex];
+        if (page) {
+          const destArray = PDFArray.withContext(context);
+          destArray.push(page.ref);
+          destArray.push(PDFName.of('XYZ'));
+          destArray.push(PDFNull);
+          destArray.push(PDFNull);
+          destArray.push(PDFNull);
+          map.set(PDFName.of('Dest'), destArray);
+        }
+
+        if (node.children && node.children.length > 0) {
+          buildOutlineDicts(node.children, ref);
+
+          map.set(PDFName.of('First'), node.children[0].ref);
+          map.set(PDFName.of('Last'), node.children[node.children.length - 1].ref);
+
+          // Compute count of open descendants
+          let count = node.children.length;
+          node.children.forEach(child => {
+            if (child.children) count += child.children.length;
+          });
+          map.set(PDFName.of('Count'), PDFNumber.of(count));
+        }
+
+        const dict = PDFDict.fromMapWithContext(map, context);
+        context.assign(ref, dict);
+      }
+    };
+
+    const outlinesRef = context.nextRef();
+    buildOutlineDicts(bookmarks, outlinesRef);
+
+    const rootMap = new Map();
+    rootMap.set(PDFName.of('Type'), PDFName.of('Outlines'));
+    rootMap.set(PDFName.of('First'), bookmarks[0].ref);
+    rootMap.set(PDFName.of('Last'), bookmarks[bookmarks.length - 1].ref);
+
+    const countNodes = (nodes) => {
+      let c = nodes.length;
+      nodes.forEach(n => {
+        if (n.children && n.children.length > 0) {
+          c += countNodes(n.children);
+        }
+      });
+      return c;
+    };
+    rootMap.set(PDFName.of('Count'), PDFNumber.of(countNodes(bookmarks)));
+
+    const outlinesDict = PDFDict.fromMapWithContext(rootMap, context);
+    context.assign(outlinesRef, outlinesDict);
+
+    pdfDoc.catalog.set(PDFName.of('Outlines'), outlinesRef);
+  }
+
+  const modifiedBytes = await pdfDoc.save({ useObjectStreams: true });
+  const targetPath = outputPath || filePath;
+  await fs.writeFile(targetPath, Buffer.from(modifiedBytes));
+  return { success: true, filePath: targetPath };
+}
+
+/**
+ * Apply redactions (black rectangles) on specified coordinates of PDF pages
+ * and delete intersecting annotations.
+ */
+export async function applyRedactions(filePath, redactions = [], outputPath = null) {
+  const bytes = await fs.readFile(filePath);
+  const pdfDoc = await PDFDocument.load(bytes);
+  const pages = pdfDoc.getPages();
+
+  for (const redaction of redactions) {
+    const { pageIndex } = redaction;
+    const page = pages[pageIndex];
+    if (!page) continue;
+
+    const { width: pageWidth, height: pageHeight } = page.getSize();
+    const rects = redaction.rects || [redaction];
+
+    for (const rect of rects) {
+      const rx = rect.x;
+      const rwidth = rect.width;
+      const rheight = rect.height;
+
+      // Convert top-left (renderer) coordinates to bottom-left (PDF) coordinates
+      // Default isTopLeft to true since renderers use top-left.
+      const isTopLeft = rect.isTopLeft !== false;
+      const ry = isTopLeft ? (pageHeight - rect.y - rheight) : rect.y;
+
+      // Draw solid black rectangle to obscure the content
+      page.drawRectangle({
+        x: rx,
+        y: ry,
+        width: rwidth,
+        height: rheight,
+        color: rgb(0, 0, 0), // Black
+      });
+
+      // Remove intersecting annotations to ensure underlying contents are deleted
+      const annots = page.node.get(PDFName.of('Annots'));
+      if (annots instanceof PDFArray) {
+        const remainingAnnots = [];
+        for (let i = 0; i < annots.size(); i++) {
+          const annotRef = annots.get(i);
+          const annot = pdfDoc.context.lookup(annotRef);
+          if (annot instanceof PDFDict) {
+            const aRect = annot.get(PDFName.of('Rect'));
+            if (aRect instanceof PDFArray && aRect.size() === 4) {
+              const ax1 = aRect.get(0).asNumber();
+              const ay1 = aRect.get(1).asNumber();
+              const ax2 = aRect.get(2).asNumber();
+              const ay2 = aRect.get(3).asNumber();
+
+              const rx1 = rx;
+              const ry1 = ry;
+              const rx2 = rx + rwidth;
+              const ry2 = ry + rheight;
+
+              const overlap = !(ax2 < rx1 || ax1 > rx2 || ay2 < ry1 || ay1 > ry2);
+              if (overlap) {
+                // Delete/skip annotation inside the redacted region
+                continue;
+              }
+            }
+          }
+          remainingAnnots.push(annotRef);
+        }
+
+        // Clear and re-populate
+        while (annots.size() > 0) {
+          annots.remove(0);
+        }
+        remainingAnnots.forEach(ref => annots.push(ref));
+      }
+    }
+  }
+
+  const modifiedBytes = await pdfDoc.save({ useObjectStreams: true });
   const targetPath = outputPath || filePath;
   await fs.writeFile(targetPath, Buffer.from(modifiedBytes));
   return { success: true, filePath: targetPath };

@@ -1,6 +1,52 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { AnnotationFactory } from '../features/Annotations.js';
 
+// Register custom Fabric.js RedactionRect class
+function registerRedactionClass() {
+  const fabric = window.fabric;
+  if (!fabric || fabric.RedactionRect) return;
+
+  fabric.RedactionRect = fabric.util.createClass(fabric.Rect, {
+    type: 'redactionRect',
+    initialize: function(options) {
+      options || (options = {});
+      this.callSuper('initialize', options);
+      this.set({
+        stroke: options.stroke || '#ff0000',
+        strokeWidth: options.strokeWidth || 2,
+        fill: options.fill || 'rgba(0, 0, 0, 0.5)',
+        isRedaction: true
+      });
+    },
+    _render: function(ctx) {
+      this.callSuper('_render', ctx);
+      
+      const w = this.width * this.scaleX;
+      const h = this.height * this.scaleY;
+      let fontSize = 12;
+      if (w > 60 && h > 20) {
+        fontSize = Math.min(24, Math.max(10, Math.floor(w / 6)));
+      }
+
+      ctx.save();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `bold ${fontSize}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('REDACT', 0, 0);
+      ctx.restore();
+    },
+    toObject: function(additionalProperties) {
+      return fabric.util.object.extend(this.callSuper('toObject', additionalProperties), {
+        isRedaction: true
+      });
+    }
+  });
+
+  fabric.RedactionRect.fromObject = function(object, callback) {
+    return fabric.Object._fromObject('RedactionRect', object, callback);
+  };
+}
 
 // Individual Page Container Component
 function PageContainer({
@@ -67,6 +113,7 @@ function PageContainer({
 
   // Set up Fabric.js overlay canvas
   useEffect(() => {
+    registerRedactionClass();
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
 
@@ -83,6 +130,10 @@ function PageContainer({
     fCanvas.selection = true;
     fCanvas.isDrawingMode = false;
 
+    let isDrawingRedact = false;
+    let redactStartPointer = null;
+    let activeRedactRect = null;
+
     // Helper to extract properties for selected Fabric objects
     const handleSelection = (obj) => {
       if (!obj) {
@@ -95,6 +146,7 @@ function PageContainer({
       else if (obj.isNoteCircle) type = 'note-circle';
       else if (obj.isTextCallout) type = 'text-callout';
       else if (obj.isStamp) type = 'stamp';
+      else if (obj.isRedaction) type = 'redaction';
       else if (obj.type === 'i-text' || obj.type === 'text' || obj.type === 'textbox') type = 'text';
       else if (obj.type === 'path') type = 'drawing';
 
@@ -131,6 +183,28 @@ function PageContainer({
 
     // Clicking on canvas to place stamps, text boxes, and signature images
     fCanvas.on('mouse:down', (options) => {
+      const pointer = fCanvas.getPointer(options.e);
+
+      if (activeTool === 'redact') {
+        isDrawingRedact = true;
+        redactStartPointer = pointer;
+        activeRedactRect = new window.fabric.RedactionRect({
+          left: pointer.x,
+          top: pointer.y,
+          width: 0,
+          height: 0,
+          fill: 'rgba(0, 0, 0, 0.5)',
+          stroke: '#ff0000',
+          strokeWidth: 2,
+          selectable: true,
+          hasControls: true,
+          isRedaction: true
+        });
+        fCanvas.add(activeRedactRect);
+        fCanvas.setActiveObject(activeRedactRect);
+        return;
+      }
+
       if (activeTool === 'select') {
         const target = options.target;
         if (target && target.isFormField && target.fieldType === 'checkbox') {
@@ -144,8 +218,6 @@ function PageContainer({
         }
         return;
       }
-
-      const pointer = fCanvas.getPointer(options.e);
 
       if (activeTool === 'text') {
         const text = AnnotationFactory.createText(pointer.x, pointer.y, { textColor: commentColor });
@@ -258,6 +330,37 @@ function PageContainer({
         fCanvas.add(checkboxObj);
         fCanvas.setActiveObject(checkboxObj);
         fCanvas.renderAll();
+        setActiveTool('select');
+      }
+    });
+
+    fCanvas.on('mouse:move', (options) => {
+      if (!isDrawingRedact || !activeRedactRect) return;
+      const pointer = fCanvas.getPointer(options.e);
+      
+      const left = Math.min(redactStartPointer.x, pointer.x);
+      const top = Math.min(redactStartPointer.y, pointer.y);
+      const width = Math.abs(redactStartPointer.x - pointer.x);
+      const height = Math.abs(redactStartPointer.y - pointer.y);
+
+      activeRedactRect.set({ left, top, width, height });
+      fCanvas.requestRenderAll();
+    });
+
+    fCanvas.on('mouse:up', () => {
+      if (isDrawingRedact) {
+        isDrawingRedact = false;
+        if (activeRedactRect) {
+          if (activeRedactRect.width < 5 || activeRedactRect.height < 5) {
+            activeRedactRect.set({
+              width: 120,
+              height: 40
+            });
+          }
+          fCanvas.setActiveObject(activeRedactRect);
+          fCanvas.requestRenderAll();
+          activeRedactRect = null;
+        }
         setActiveTool('select');
       }
     });
@@ -420,11 +523,19 @@ function PageContainer({
     }
 
     if (activeTool === 'select') {
+      fCanvas.selection = true;
       fCanvas.forEachObject(obj => {
         obj.selectable = true;
         obj.evented = true;
       });
+    } else if (activeTool === 'redact') {
+      fCanvas.selection = false;
+      fCanvas.forEachObject(obj => {
+        obj.selectable = false;
+        obj.evented = false;
+      });
     } else if (['text', 'stamp', 'note', 'eraser', 'signature', 'textfield', 'checkbox'].includes(activeTool)) {
+      fCanvas.selection = false;
       fCanvas.forEachObject(obj => {
         obj.selectable = false;
         obj.evented = true;

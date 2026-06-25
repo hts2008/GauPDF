@@ -1,8 +1,9 @@
 // src/main/index.js
-import { app, ipcMain } from 'electron';
+import { app, ipcMain, BrowserWindow } from 'electron';
 import path from 'path';
 import WindowManager from './window-manager.js';
 import { registerIpcHandlers } from './ipc-handlers.js';
+import { setupAutoUpdater } from './updater.js';
 
 // Setup single instance lock
 const gotTheLock = app.requestSingleInstanceLock();
@@ -49,6 +50,9 @@ if (!gotTheLock) {
     
     // Register all IPC events and handlers
     registerIpcHandlers();
+
+    // Setup and trigger auto updater checks
+    setupAutoUpdater();
 
     // Check files queue from macOS open-file event
     if (macFilesQueue.length > 0) {

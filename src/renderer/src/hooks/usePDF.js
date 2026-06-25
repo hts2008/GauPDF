@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
-import { PDFDocument, rgb } from 'pdf-lib';
+import { PDFDocument, rgb, PDFString } from 'pdf-lib';
 
 // Configure PDF.js Worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -9,6 +9,130 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 import { getCanvasPointer } from '../utils/canvas-utils.js';
 import { AddObjectCommand, RemoveObjectCommand, ModifyObjectCommand } from './useUndoRedo.js';
 import { AnnotationFactory, getArrowPath } from '../features/Annotations.js';
+
+// Register custom Fabric.js RedactionRect class
+function registerRedactionClass() {
+  const fabric = window.fabric;
+  if (!fabric || fabric.RedactionRect) return;
+
+  fabric.RedactionRect = fabric.util.createClass(fabric.Rect, {
+    type: 'redactionRect',
+    initialize: function(options) {
+      options || (options = {});
+      this.callSuper('initialize', options);
+      this.set({
+        stroke: options.stroke || '#ff0000',
+        strokeWidth: options.strokeWidth || 2,
+        fill: options.fill || 'rgba(0, 0, 0, 0.5)',
+        isRedaction: true
+      });
+    },
+    _render: function(ctx) {
+      this.callSuper('_render', ctx);
+      
+      const w = this.width * this.scaleX;
+      const h = this.height * this.scaleY;
+      let fontSize = 12;
+      if (w > 60 && h > 20) {
+        fontSize = Math.min(24, Math.max(10, Math.floor(w / 6)));
+      }
+
+      ctx.save();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `bold ${fontSize}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('REDACT', 0, 0);
+      ctx.restore();
+    },
+    toObject: function(additionalProperties) {
+      return fabric.util.object.extend(this.callSuper('toObject', additionalProperties), {
+        isRedaction: true
+      });
+    }
+  });
+
+  fabric.RedactionRect.fromObject = function(object, callback) {
+    return fabric.Object._fromObject('RedactionRect', object, callback);
+  };
+}
+
+// Low-level helper to write outline hierarchy to a pdf-lib PDFDocument
+const writeOutlines = (pdfDoc, bookmarks) => {
+  if (!bookmarks || bookmarks.length === 0) return;
+  try {
+    const context = pdfDoc.context;
+    const catalog = pdfDoc.catalog;
+
+    const outlineRef = context.nextRef();
+    
+    const allocateRefs = (items, parentRef) => {
+      const allocated = [];
+      for (const item of items) {
+        const ref = context.nextRef();
+        const childItems = item.items && item.items.length > 0 ? allocateRefs(item.items, ref) : [];
+        allocated.push({
+          item,
+          ref,
+          parentRef,
+          children: childItems
+        });
+      }
+      return allocated;
+    };
+
+    const rootItems = allocateRefs(bookmarks, outlineRef);
+
+    const registerItems = (allocatedList) => {
+      for (let i = 0; i < allocatedList.length; i++) {
+        const node = allocatedList[i];
+        const prevNode = i > 0 ? allocatedList[i - 1] : null;
+        const nextNode = i < allocatedList.length - 1 ? allocatedList[i + 1] : null;
+
+        const dict = context.obj({
+          Title: PDFString.of(node.item.title),
+          Parent: node.parentRef,
+        });
+
+        if (prevNode) dict.set(context.obj('Prev'), prevNode.ref);
+        if (nextNode) dict.set(context.obj('Next'), nextNode.ref);
+
+        if (node.children.length > 0) {
+          dict.set(context.obj('First'), node.children[0].ref);
+          dict.set(context.obj('Last'), node.children[node.children.length - 1].ref);
+          dict.set(context.obj('Count'), context.obj(node.children.length));
+        }
+
+        let destPageNum = node.item.pageNumber || 1;
+        const pages = pdfDoc.getPages();
+        const pageIndex = Math.min(Math.max(0, destPageNum - 1), pages.length - 1);
+        const pageRef = pages[pageIndex].ref;
+
+        dict.set(context.obj('Dest'), context.array([pageRef, context.obj('Fit')]));
+
+        context.assign(node.ref, dict);
+
+        if (node.children.length > 0) {
+          registerItems(node.children);
+        }
+      }
+    };
+
+    registerItems(rootItems);
+
+    const outlineDict = context.obj({
+      Type: 'Outlines',
+      First: rootItems[0].ref,
+      Last: rootItems[rootItems.length - 1].ref,
+      Count: rootItems.length
+    });
+
+    context.assign(outlineRef, outlineDict);
+    catalog.set(context.obj('Outlines'), outlineRef);
+  } catch (err) {
+    console.error("Error writing PDF outlines in writeOutlines:", err);
+  }
+};
 
 /**
  * Custom React hook for managing PDF rendering and annotation editing layers.
@@ -32,7 +156,8 @@ export function usePDF(containerRef, history, options = {}) {
   const [currentPage, setCurrentPage] = useState(1);
   const [numPages, setNumPages] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [currentMode, setCurrentMode] = useState('select'); // select, draw, highlight, text, rect, circle, line, arrow, eraser, note, callout, stamp, textfield, checkbox
+  const [currentMode, setCurrentMode] = useState('select'); // select, draw, highlight, text, rect, circle, line, arrow, eraser, note, callout, stamp, textfield, checkbox, redact
+  const [bookmarks, setBookmarks] = useState([]);
   
   const [drawingSettings, setDrawingSettings] = useState({
     strokeColor: '#ff0000',
@@ -49,6 +174,8 @@ export function usePDF(containerRef, history, options = {}) {
 
   const pdfDocRef = useRef(null);
   const pdfLibDocRef = useRef(null);
+  const pdfBytesRef = useRef(null);
+  const filePathRef = useRef(null);
   const pagesRef = useRef([]); // Stores page wrappers, canvas info, and render tasks
   const canvasesMapRef = useRef(new Map()); // pageNumber -> fabric.Canvas
   const activeDrawingObjectRef = useRef(null);
@@ -56,6 +183,10 @@ export function usePDF(containerRef, history, options = {}) {
   const startXRef = useRef(0);
   const startYRef = useRef(0);
   const objectBeforeStateRef = useRef(null);
+
+  useEffect(() => {
+    registerRedactionClass();
+  }, []);
 
   // Initialize PDF container styles
   useEffect(() => {
@@ -289,6 +420,19 @@ export function usePDF(containerRef, history, options = {}) {
         case 'rect':
           shape = AnnotationFactory.createRect(pointer.x, pointer.y, drawingSettings);
           break;
+        case 'redact':
+          shape = new window.fabric.RedactionRect({
+            left: pointer.x,
+            top: pointer.y,
+            width: 0,
+            height: 0,
+            stroke: '#ff0000',
+            strokeWidth: 2,
+            fill: 'rgba(0, 0, 0, 0.5)',
+            selectable: false,
+            hasControls: false
+          });
+          break;
         case 'circle':
           shape = AnnotationFactory.createCircle(pointer.x, pointer.y, drawingSettings);
           break;
@@ -317,6 +461,7 @@ export function usePDF(containerRef, history, options = {}) {
 
       switch (currentMode) {
         case 'rect':
+        case 'redact':
           shape.set({
             left: w > 0 ? startXRef.current : pointer.x,
             top: h > 0 ? startYRef.current : pointer.y,
@@ -666,8 +811,65 @@ export function usePDF(containerRef, history, options = {}) {
     renderAll();
   }, [scale, rotation, renderPage]);
 
+  const extractBookmarks = async (doc) => {
+    try {
+      const outline = await doc.getOutline();
+      if (!outline) return [];
+
+      const resolveDest = async (dest) => {
+        if (!dest) return null;
+        let explicitDest = dest;
+        if (typeof dest === 'string') {
+          explicitDest = await doc.getDestination(dest);
+        }
+        if (Array.isArray(explicitDest)) {
+          const pageRef = explicitDest[0];
+          if (pageRef && typeof pageRef === 'object') {
+            try {
+              const pageIndex = await doc.getPageIndex(pageRef);
+              return pageIndex + 1;
+            } catch (e) {
+              console.warn("Failed to get page index for ref:", pageRef, e);
+            }
+          }
+        }
+        return null;
+      };
+
+      const processItems = async (items) => {
+        const result = [];
+        for (const item of items) {
+          let pageNumber = null;
+          if (item.dest) {
+            pageNumber = await resolveDest(item.dest);
+          }
+          const newItem = {
+            id: 'bm_' + Math.random().toString(36).substring(2, 9),
+            title: item.title,
+            bold: item.bold,
+            italic: item.italic,
+            color: item.color,
+            dest: item.dest || pageNumber || 1,
+            pageNumber: pageNumber || 1,
+            items: []
+          };
+          if (item.items && item.items.length > 0) {
+            newItem.items = await processItems(item.items);
+          }
+          result.push(newItem);
+        }
+        return result;
+      };
+
+      return await processItems(outline);
+    } catch (err) {
+      console.error("Error extracting bookmarks:", err);
+      return [];
+    }
+  };
+
   // Document loader
-  const loadPDF = async (src) => {
+  const loadPDF = async (src, password = null) => {
     setLoading(true);
     try {
       destroyViewer();
@@ -682,16 +884,54 @@ export function usePDF(containerRef, history, options = {}) {
         pdfBytes = new Uint8Array(await response.arrayBuffer());
       }
       pdfBytesRef.current = pdfBytes;
-      pdfLibDocRef.current = await PDFDocument.load(pdfBytes);
+      if (typeof src === 'string') {
+        filePathRef.current = src;
+      }
+
+      let currentPassword = password;
+      let pdfLibDoc = null;
+      let success = false;
+      let attempts = 0;
+
+      while (!success && attempts < 3) {
+        try {
+          pdfLibDoc = await PDFDocument.load(pdfBytes, currentPassword ? { password: currentPassword } : {});
+          success = true;
+        } catch (err) {
+          if (err.message && (err.message.includes('encrypted') || err.message.includes('password') || err.message.includes('Password'))) {
+            attempts++;
+            currentPassword = prompt(attempts === 1 
+              ? 'This PDF is password-protected. Please enter the password:' 
+              : 'Incorrect password. Please try again:'
+            );
+            if (currentPassword === null) {
+              throw new Error('Password entry cancelled.');
+            }
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      if (!success) {
+        throw new Error('Failed to decrypt PDF document after multiple attempts.');
+      }
+
+      pdfLibDocRef.current = pdfLibDoc;
 
       const loadingTask = pdfjsLib.getDocument({
         data: pdfBytes,
         cMapUrl: 'node_modules/pdfjs-dist/cmaps/',
         cMapPacked: true,
+        password: currentPassword || undefined
       });
 
       const doc = await loadingTask.promise;
       pdfDocRef.current = doc;
+
+      const tree = await extractBookmarks(doc);
+      setBookmarks(tree || []);
+
       setNumPages(doc.numPages);
       setCurrentPage(1);
 
@@ -959,7 +1199,7 @@ export function usePDF(containerRef, history, options = {}) {
   const exportAnnotations = () => {
     const data = [];
     canvasesMapRef.current.forEach((canvas, pageNum) => {
-      const json = canvas.toJSON(['isNoteCircle', 'noteText', 'isTextCallout', 'isStamp', 'stampText', 'isFormField', 'fieldType', 'fieldId', 'maxLength', 'required', 'value']);
+      const json = canvas.toJSON(['isNoteCircle', 'noteText', 'isTextCallout', 'isStamp', 'stampText', 'isFormField', 'fieldType', 'fieldId', 'maxLength', 'required', 'value', 'isRedaction']);
       data.push({
         pageNumber: pageNum,
         annotations: json.objects
@@ -994,6 +1234,148 @@ export function usePDF(containerRef, history, options = {}) {
     });
     clearHistory();
   };
+
+  const addBookmark = useCallback((title, pageNumber, parentId = null) => {
+    const newBookmark = {
+      id: 'bm_' + Math.random().toString(36).substring(2, 9),
+      title,
+      dest: pageNumber,
+      pageNumber,
+      items: []
+    };
+
+    setBookmarks(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!parentId) {
+        copy.push(newBookmark);
+        return copy;
+      }
+
+      const insertUnderParent = (items) => {
+        for (const item of items) {
+          if (item.id === parentId) {
+            if (!item.items) item.items = [];
+            item.items.push(newBookmark);
+            return true;
+          }
+          if (item.items && item.items.length > 0) {
+            if (insertUnderParent(item.items)) return true;
+          }
+        }
+        return false;
+      };
+
+      insertUnderParent(copy);
+      return copy;
+    });
+  }, []);
+
+  const editBookmark = useCallback((id, newTitle, newPageNumber) => {
+    setBookmarks(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      
+      const updateItem = (items) => {
+        for (const item of items) {
+          if (item.id === id) {
+            item.title = newTitle;
+            item.pageNumber = newPageNumber;
+            item.dest = newPageNumber;
+            return true;
+          }
+          if (item.items && item.items.length > 0) {
+            if (updateItem(item.items)) return true;
+          }
+        }
+        return false;
+      };
+
+      updateItem(copy);
+      return copy;
+    });
+  }, []);
+
+  const removeBookmark = useCallback((id) => {
+    setBookmarks(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+
+      const removeItem = (items) => {
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].id === id) {
+            items.splice(i, 1);
+            return true;
+          }
+          if (items[i].items && items[i].items.length > 0) {
+            if (removeItem(items[i].items)) return true;
+          }
+        }
+        return false;
+      };
+
+      removeItem(copy);
+      return copy;
+    });
+  }, []);
+
+  const collectRedactions = useCallback(async () => {
+    const redactions = [];
+    
+    canvasesMapRef.current.forEach((canvas, pageNumber) => {
+      const objects = canvas.getObjects();
+      objects.forEach(obj => {
+        if (obj.isRedaction || obj.type === 'redactionRect') {
+          // viewport scale is the hook's scale
+          const x = obj.left / scale;
+          const y = obj.top / scale;
+          const width = (obj.width * obj.scaleX) / scale;
+          const height = (obj.height * obj.scaleY) / scale;
+          
+          redactions.push({
+            pageNumber,
+            x,
+            y,
+            width,
+            height
+          });
+        }
+      });
+    });
+
+    if (redactions.length === 0) {
+      console.log('No redactions found to burn in.');
+      return null;
+    }
+
+    if (window.api) {
+      try {
+        const result = await window.api.invoke('pdf:redact', {
+          filePath: filePathRef.current,
+          redactions: redactions.map(r => ({
+            pageIndex: r.pageNumber - 1,
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height
+          }))
+        });
+        return result;
+      } catch (err) {
+        console.error('Error invoking permanent burn-in IPC:', err);
+        throw err;
+      }
+    } else {
+      console.log('Mock: Permanent burn-in triggered via IPC', {
+        filePath: filePathRef.current,
+        redactions: redactions.map(r => ({
+          pageIndex: r.pageNumber - 1,
+          x: r.x,
+          y: r.y,
+          width: r.width,
+          height: r.height
+        }))
+      });
+      return { success: true, mock: true };
+    }
+  }, [scale]);
 
   // Compile Fabric form fields and return modified PDF Uint8Array bytes using pdf-lib
   const compilePDF = async () => {
@@ -1087,6 +1469,10 @@ export function usePDF(containerRef, history, options = {}) {
         }
       }
 
+      if (bookmarks && bookmarks.length > 0) {
+        writeOutlines(pdfLibDocRef.current, bookmarks);
+      }
+
       const pdfBytes = await pdfLibDocRef.current.save();
       return pdfBytes;
     } catch (err) {
@@ -1103,6 +1489,7 @@ export function usePDF(containerRef, history, options = {}) {
     loading,
     currentMode,
     drawingSettings,
+    bookmarks,
     loadPDF,
     zoomIn,
     zoomOut,
@@ -1117,6 +1504,10 @@ export function usePDF(containerRef, history, options = {}) {
     importAnnotations,
     clearAnnotations,
     compilePDF,
+    addBookmark,
+    editBookmark,
+    removeBookmark,
+    collectRedactions,
     fabricCanvases: canvasesMapRef.current
   };
 }

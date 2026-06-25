@@ -30,7 +30,9 @@ export default function Toolbar({
   onSplitClick,
   onCompressClick,
   onSignatureClick,
-  hasActiveDoc
+  hasActiveDoc,
+  onApplyRedactions,
+  onSecurityClick
 }) {
   return (
     <section id="toolbar-container">
@@ -92,6 +94,9 @@ export default function Toolbar({
           </button>
           <button onClick={onPrintClick} className="btn btn-secondary" title="Print document (Ctrl+P)" disabled={!hasActiveDoc}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+          </button>
+          <button onClick={onSecurityClick} className="btn btn-icon" title="PDF security and passwords" disabled={!hasActiveDoc}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
           </button>
           <button onClick={onSettingsClick} className="btn btn-icon" title="System settings">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -190,7 +195,38 @@ export default function Toolbar({
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polygon points="21 15 16 10 5 21"/></svg>
                 <span>Add Image</span>
               </button>
+              
               <div className="toolbar-separator"></div>
+
+              <button
+                className={`btn btn-secondary ${activeTool === 'redact' ? 'active' : ''}`}
+                onClick={() => setActiveTool('redact')}
+                title="Draw redaction rectangles"
+                style={{
+                  background: activeTool === 'redact' ? 'rgba(239, 68, 68, 0.25)' : '',
+                  color: activeTool === 'redact' ? '#ef4444' : '',
+                  borderColor: activeTool === 'redact' ? '#ef4444' : ''
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" fill="currentColor"/></svg>
+                <span>Redact</span>
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={onApplyRedactions}
+                title="Permanently apply black redactions to document"
+                style={{
+                  background: 'rgba(239, 68, 68, 0.1)',
+                  borderColor: 'rgba(239, 68, 68, 0.4)',
+                  color: '#ef4444'
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                <span>Apply Redactions</span>
+              </button>
+
+              <div className="toolbar-separator"></div>
+              
               <button
                 className="btn btn-secondary"
                 onClick={onOcrClick}
