@@ -1,0 +1,61 @@
+/* src/renderer/css/print.css */
+
+@media print {
+  /* Hide all app Chrome/UI elements */
+  #titlebar,
+  #toolbar-container,
+  .sidebar,
+  #tabs-header,
+  #statusbar,
+  #toast-container,
+  .dialog-backdrop,
+  #welcome-dashboard,
+  .sidebar-resizer,
+  .page-flag {
+    display: none !important;
+  }
+
+  /* Reset layout grids for printing */
+  html, body, #app-container, #app-body, #workspace-container, #document-workspace, #document-viewport {
+    background: #ffffff !important;
+    color: #000000 !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    display: block !important;
+    position: static !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+  }
+
+  /* Target rendered PDF page wrappers */
+  .pdf-page-container {
+    background: #ffffff !important;
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    page-break-after: always;
+    break-after: page;
+    position: relative !important;
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+  }
+
+  /* Stretch the canvases inside printed pages */
+  .pdf-canvas {
+    width: 100% !important;
+    height: auto !important;
+    max-width: 100% !important;
+    display: block !important;
+  }
+
+  /* Hide canvas overlays during print unless annotations are flattened */
+  .canvas-container {
+    display: none !important;
+  }
+}

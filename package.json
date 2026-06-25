@@ -1,0 +1,30 @@
+{
+  "name": "gaupdf",
+  "version": "1.0.0",
+  "description": "GauPDF Editor — Desktop Application",
+  "main": "./out/main/index.js",
+  "author": "hts2008 <haitranson2005@gmail.com>",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "pack": "electron-vite build && electron-builder --dir",
+    "dist": "electron-vite build && electron-builder"
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "electron-store": "^8.2.0",
+    "electron-updater": "^6.1.7",
+    "jspdf": "^2.5.1",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.2.67",
+    "tesseract.js": "^5.1.0"
+  },
+  "devDependencies": {
+    "electron": "^30.0.9",
+    "electron-builder": "^24.13.3",
+    "electron-vite": "^2.3.0",
+    "vite": "^5.2.11"
+  }
+}

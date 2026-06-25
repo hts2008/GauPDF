@@ -1,0 +1,18 @@
+appId: com.gaupdf.editor
+productName: GauPDF Editor
+copyright: Copyright © 2026 hts2008
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - out/**/*
+  - package.json
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: resources/icon.ico
+nsis:
+  oneClick: false
+  perMachine: true
+  allowToChangeInstallationDirectory: true
