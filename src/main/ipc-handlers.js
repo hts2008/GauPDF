@@ -44,6 +44,31 @@ export function registerIpcHandlers() {
     return { success: false, error: 'No file path provided' };
   });
 
+  ipcMain.handle('pdf:create-blank', async (event) => {
+    console.log('[IPC] pdf:create-blank requested');
+    try {
+      const { PDFDocument } = await import('pdf-lib');
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const { app } = await import('electron');
+
+      const pdfDoc = await PDFDocument.create();
+      pdfDoc.addPage([595.276, 841.89]); // A4 dimensions in points
+      const pdfBytes = await pdfDoc.save();
+
+      const tempDir = path.join(app.getPath('userData'), 'temp');
+      await fs.mkdir(tempDir, { recursive: true });
+      const tempPath = path.join(tempDir, `Untitled_${Date.now()}.pdf`);
+      await fs.writeFile(tempPath, pdfBytes);
+
+      WindowManager.createDocumentWindow(tempPath, true); // Open as new/temp document
+      return { success: true, filePath: tempPath };
+    } catch (err) {
+      console.error('[IPC] Error creating blank PDF:', err);
+      throw err;
+    }
+  });
+
   // --- File Operations ---
   ipcMain.handle(IPC_CHANNELS.FILE_OPEN, async (event, options = {}) => {
     const win = getWindow(event);
@@ -53,8 +78,13 @@ export function registerIpcHandlers() {
     if (options.multi) {
       const { dialog } = await import('electron');
       const result = await dialog.showOpenDialog(win, {
-        title: 'Select PDF Documents',
-        filters: [{ name: 'PDF Files', extensions: ['pdf'] }],
+        title: 'Select Files to Combine',
+        filters: [
+          { name: 'All Supported Files', extensions: ['pdf', 'docx', 'doc', 'odt', 'txt', 'png', 'jpg', 'jpeg'] },
+          { name: 'PDF Files', extensions: ['pdf'] },
+          { name: 'Word & Text Documents', extensions: ['docx', 'doc', 'odt', 'txt'] },
+          { name: 'Image Files', extensions: ['png', 'jpg', 'jpeg'] }
+        ],
         properties: ['openFile', 'multiSelections']
       });
 
@@ -147,10 +177,10 @@ export function registerIpcHandlers() {
   // --- PDF Operations ---
   ipcMain.handle(IPC_CHANNELS.PDF_MERGE, async (event, payload) => {
     const win = getWindow(event);
-    // Support either direct file paths array or object wrapping
     const filePaths = Array.isArray(payload) ? payload : payload.files;
-    console.log('[IPC] pdf:merge requested for files:', filePaths);
-    return await mergePDFs(win, filePaths);
+    const defaultFileName = (payload && typeof payload === 'object') ? (payload.outputPath || 'merged.pdf') : 'merged.pdf';
+    console.log('[IPC] pdf:merge requested for files:', filePaths, 'defaultFileName:', defaultFileName);
+    return await mergePDFs(win, filePaths, defaultFileName);
   });
 
   ipcMain.handle(IPC_CHANNELS.PDF_SPLIT, async (event, payload) => {

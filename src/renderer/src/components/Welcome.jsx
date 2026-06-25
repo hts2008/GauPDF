@@ -12,33 +12,13 @@ export default function Welcome({
   onOpenConvertToPdfDialog,
   onOpenConvertFromPdfDialog,
   onOpenWatermarkDialog,
-  onOpenHeaderFooterDialog
+  onOpenHeaderFooterDialog,
+  recentFiles = [],
+  onClearHistory,
+  onRemoveRecent,
+  onRecentClick,
+  onNewBlankPDF
 }) {
-  const [recentFiles, setRecentFiles] = useState([]);
-
-  const loadRecentFiles = async () => {
-    let files = [];
-    if (window.api && typeof window.api.invoke === 'function') {
-      try {
-        files = await window.api.invoke(IPC_CHANNELS.APP_RECENT_FILES, { action: 'get' });
-      } catch (err) {
-        console.error('Error fetching recent files via IPC, falling back', err);
-      }
-    } else {
-      const stored = localStorage.getItem('gaupdf-recents');
-      if (stored) {
-        try {
-          files = JSON.parse(stored);
-        } catch (_) {}
-      }
-    }
-    setRecentFiles(files);
-  };
-
-  useEffect(() => {
-    loadRecentFiles();
-  }, []);
-
   const handleOpenFileDialog = async () => {
     if (window.api && typeof window.api.invoke === 'function') {
       try {
@@ -60,49 +40,16 @@ export default function Welcome({
     }
   };
 
-  const handleClearHistory = async () => {
-    if (window.api && typeof window.api.invoke === 'function') {
-      try {
-        await window.api.invoke(IPC_CHANNELS.APP_RECENT_FILES, { action: 'clear' });
-      } catch (err) {
-        console.error(err);
-      }
-    } else {
-      localStorage.removeItem('gaupdf-recents');
-    }
-    NotificationSystem.success('History', 'Recent files history cleared successfully.');
-    loadRecentFiles();
+  const handleClearHistory = () => {
+    if (onClearHistory) onClearHistory();
   };
 
-  const handleRemoveRecent = async (e, filePath) => {
-    e.stopPropagation();
-    if (window.api && typeof window.api.invoke === 'function') {
-      try {
-        await window.api.invoke(IPC_CHANNELS.APP_RECENT_FILES, { action: 'remove', path: filePath });
-      } catch (err) {
-        console.error(err);
-      }
-    } else {
-      let files = [];
-      const stored = localStorage.getItem('gaupdf-recents');
-      if (stored) {
-        try { files = JSON.parse(stored); } catch (_) {}
-      }
-      files = files.filter(f => f.path !== filePath);
-      localStorage.setItem('gaupdf-recents', JSON.stringify(files));
-    }
-    NotificationSystem.info('History', 'Removed file from history.');
-    loadRecentFiles();
+  const handleRemoveRecent = (e, filePath) => {
+    if (onRemoveRecent) onRemoveRecent(e, filePath);
   };
 
   const handleRecentClick = (file) => {
-    const pathStr = typeof file === 'string' ? file : file.path;
-    const nameStr = typeof file === 'string' ? file.split(/[/\\]/).pop() : (file.name || file.path.split(/[/\\]/).pop());
-    if (window.api) {
-      window.api.openFileInNewWindow(pathStr);
-    } else {
-      onOpenFile(nameStr, null);
-    }
+    if (onRecentClick) onRecentClick(file);
   };
 
   return (
@@ -127,6 +74,11 @@ export default function Welcome({
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
           <span>Open PDF File</span>
           <p>Browse a PDF file from your computer</p>
+        </div>
+        <div className="quick-action-card" onClick={onNewBlankPDF}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+          <span>Create Blank PDF</span>
+          <p>Create a new 1-page blank document</p>
         </div>
         <div className="quick-action-card" onClick={onOpenMergeDialog}>
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
@@ -179,7 +131,6 @@ export default function Welcome({
           <p>System & display configuration</p>
         </div>
       </div>
-
       <div className="recents-container">
         <div className="recents-header">
           <h3>Recent Files</h3>

@@ -33,7 +33,7 @@ function getRecoveryDir() {
 /**
  * Add a path to the recent files list in store
  */
-function addToRecentFiles(filePath) {
+export function addToRecentFiles(filePath) {
   let recent = store.get('recentFiles') || [];
   recent = recent.filter(p => p !== filePath);
   recent.unshift(filePath);
@@ -232,14 +232,14 @@ export async function checkRecoveryFiles() {
 /**
  * Merge multiple PDF documents into a single document
  */
-export async function mergePDFs(browserWindow, filePaths) {
+export async function mergePDFs(browserWindow, filePaths, defaultFileName = 'merged.pdf') {
   if (!filePaths || filePaths.length === 0) {
     return null;
   }
 
   const result = await dialog.showSaveDialog(browserWindow, {
     title: 'Save Merged PDF',
-    defaultPath: 'merged.pdf',
+    defaultPath: defaultFileName,
     filters: [{ name: 'PDF Files', extensions: ['pdf'] }]
   });
 
@@ -249,22 +249,81 @@ export async function mergePDFs(browserWindow, filePaths) {
 
   const outputPath = result.filePath;
   const mergedPdf = await PDFDocument.create();
+  const tempFilesToDelete = [];
 
-  for (const filePath of filePaths) {
-    const bytes = await fs.readFile(filePath);
-    const pdf = await PDFDocument.load(bytes);
-    const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
-    copiedPages.forEach((page) => mergedPdf.addPage(page));
+  try {
+    for (const filePath of filePaths) {
+      const ext = path.extname(filePath).toLowerCase();
+      
+      if (ext === '.pdf') {
+        const bytes = await fs.readFile(filePath);
+        const pdf = await PDFDocument.load(bytes);
+        const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+        copiedPages.forEach((page) => mergedPdf.addPage(page));
+      } 
+      else if (['.jpg', '.jpeg', '.png'].includes(ext)) {
+        const imgBytes = await fs.readFile(filePath);
+        let embeddedImage;
+        if (ext === '.png') {
+          embeddedImage = await mergedPdf.embedPng(imgBytes);
+        } else {
+          embeddedImage = await mergedPdf.embedJpg(imgBytes);
+        }
+        const page = mergedPdf.addPage([embeddedImage.width, embeddedImage.height]);
+        page.drawImage(embeddedImage, {
+          x: 0,
+          y: 0,
+          width: embeddedImage.width,
+          height: embeddedImage.height
+        });
+      } 
+      else {
+        // Word, Excel, PPT, text, etc. Convert via LibreOffice
+        console.log(`[file-manager] Converting ${filePath} to PDF via LibreOffice...`);
+        try {
+          const { convertToPdf } = await import('./libreoffice-service.js');
+          const tempDir = path.join(app.getPath('userData'), 'temp');
+          await fs.mkdir(tempDir, { recursive: true });
+          const conversionResult = await convertToPdf(filePath, tempDir);
+          
+          if (conversionResult && conversionResult.success) {
+            const tempPdfPath = conversionResult.filePath;
+            tempFilesToDelete.push(tempPdfPath);
+            
+            const bytes = await fs.readFile(tempPdfPath);
+            const pdf = await PDFDocument.load(bytes);
+            const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+            copiedPages.forEach((page) => mergedPdf.addPage(page));
+          }
+        } catch (err) {
+          console.error(`[file-manager] Failed to convert ${filePath} via LibreOffice:`, err);
+          throw new Error(`Cannot merge "${path.basename(filePath)}". Format conversion failed. Make sure LibreOffice is installed.`);
+        }
+      }
+    }
+
+    const mergedPdfBytes = await mergedPdf.save({ useObjectStreams: true });
+    await fs.writeFile(outputPath, mergedPdfBytes);
+    addToRecentFiles(outputPath);
+    
+    // Dynamically import WindowManager to avoid circular dependencies
+    const { default: WindowManager } = await import('./window-manager.js');
+    WindowManager.createDocumentWindow(outputPath);
+
+    return {
+      filePath: outputPath,
+      name: path.basename(outputPath)
+    };
+  } finally {
+    // Clean up temporary converted files
+    for (const tempPath of tempFilesToDelete) {
+      try {
+        await fs.unlink(tempPath);
+      } catch (e) {
+        console.warn(`[file-manager] Failed to delete temp file ${tempPath}:`, e);
+      }
+    }
   }
-
-  const mergedPdfBytes = await mergedPdf.save({ useObjectStreams: true });
-  await fs.writeFile(outputPath, mergedPdfBytes);
-  addToRecentFiles(outputPath);
-
-  return {
-    filePath: outputPath,
-    name: path.basename(outputPath)
-  };
 }
 
 /**

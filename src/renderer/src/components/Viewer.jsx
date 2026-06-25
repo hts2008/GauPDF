@@ -59,6 +59,7 @@ function PageContainer({
   commentColor,
   strokeWidth,
   savedSignatureDataUrl,
+  imageToInsert,
   onObjectSelected,
   onAddFormField,
   formFields,
@@ -259,6 +260,29 @@ function PageContainer({
             top: pointer.y - 50,
             scaleX: 0.5,
             scaleY: 0.5,
+            selectable: true,
+            cornerColor: '#6366f1',
+            cornerSize: 8,
+            transparentCorners: false
+          });
+          fCanvas.add(img);
+          fCanvas.setActiveObject(img);
+          fCanvas.renderAll();
+          setActiveTool('select');
+        });
+      } else if (activeTool === 'image' && imageToInsert) {
+        window.fabric.Image.fromURL(imageToInsert, (img) => {
+          let scaleX = 0.5;
+          let scaleY = 0.5;
+          if (img.width > 300) {
+            scaleX = 200 / img.width;
+            scaleY = 200 / img.width;
+          }
+          img.set({
+            left: pointer.x - (img.width * scaleX) / 2,
+            top: pointer.y - (img.height * scaleY) / 2,
+            scaleX: scaleX,
+            scaleY: scaleY,
             selectable: true,
             cornerColor: '#6366f1',
             cornerSize: 8,
@@ -604,6 +628,7 @@ export default function Viewer({
   commentColor,
   strokeWidth,
   savedSignatureDataUrl,
+  imageToInsert,
   setSelectedObject,
   formFields,
   onAddFormField,
@@ -668,6 +693,7 @@ export default function Viewer({
                 commentColor={commentColor}
                 strokeWidth={strokeWidth}
                 savedSignatureDataUrl={savedSignatureDataUrl}
+                imageToInsert={imageToInsert}
                 onObjectSelected={setSelectedObject}
                 onAddFormField={onAddFormField}
                 formFields={formFields}

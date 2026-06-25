@@ -16,7 +16,10 @@ export default function Titlebar({
   onHeaderFooterClick,
   onConvertToPdfClick,
   onConvertFromPdfClick,
-  hasActiveDoc
+  hasActiveDoc,
+  recentFiles = [],
+  onRecentClick,
+  onNewClick
 }) {
   const [isMaximized, setIsMaximized] = useState(false);
   const [activeMenu, setActiveMenu] = useState(null); // null | 'file' | 'convert' | 'tools'
@@ -99,11 +102,42 @@ export default function Titlebar({
             </button>
             {activeMenu === 'file' && (
               <div className="title-dropdown-menu">
+                <button className="dropdown-item" onClick={() => handleAction(onNewClick)}>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+                  <span>New PDF Document</span>
+                  <kbd>Ctrl+N</kbd>
+                </button>
                 <button className="dropdown-item" onClick={() => handleAction(onOpenClick)}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                   <span>Open File...</span>
                   <kbd>Ctrl+O</kbd>
                 </button>
+                
+                {/* Open Recent Submenu */}
+                <div className="dropdown-submenu-container">
+                  <div className="dropdown-item submenu-trigger">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
+                    <span>Open Recent</span>
+                    <span className="submenu-arrow">▶</span>
+                  </div>
+                  <div className="dropdown-submenu">
+                    {recentFiles && recentFiles.length > 0 ? (
+                      recentFiles.map((file, idx) => {
+                        const pathStr = typeof file === 'string' ? file : file.path;
+                        const nameStr = typeof file === 'string' ? file.split(/[/\\]/).pop() : (file.name || file.path.split(/[/\\]/).pop());
+                        return (
+                          <button key={idx} className="dropdown-item" onClick={() => handleAction(() => onRecentClick(file))} title={pathStr}>
+                            <span className="recent-submenu-name">{nameStr}</span>
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="dropdown-item disabled">No recent files</div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="dropdown-divider"></div>
                 <button className="dropdown-item" onClick={() => handleAction(onSaveClick)} disabled={!hasActiveDoc}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
                   <span>Save</span>

@@ -5,10 +5,12 @@ const { contextBridge, ipcRenderer } = require('electron');
 const args = process.argv || [];
 const windowTypeArg = args.find(arg => arg.startsWith('--window-type='));
 const filePathArg = args.find(arg => arg.startsWith('--file-path='));
+const isNewArg = args.find(arg => arg.startsWith('--is-new='));
 
 const windowConfig = {
   mode: windowTypeArg ? windowTypeArg.split('=')[1] : 'welcome',
-  filePath: filePathArg ? filePathArg.split('=')[1] : null
+  filePath: filePathArg ? filePathArg.split('=')[1] : null,
+  isNew: isNewArg ? isNewArg.split('=')[1] === 'true' : false
 };
 
 console.log('[Preload] Exposing API with window config:', windowConfig);

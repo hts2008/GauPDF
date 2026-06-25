@@ -201,11 +201,240 @@ const writeOutlines = (pdfDoc, bookmarks, PDFString) => {
   }
 };
 
+// Helper to extract color and opacity from hex or rgb/rgba string
+const getColorAndOpacity = (colorStr, rgbFunc, defaultOpacity = 1.0) => {
+  let opacity = defaultOpacity;
+  let color = rgbFunc(0, 0, 0);
+  
+  if (!colorStr || colorStr === 'transparent') {
+    return { color, opacity: 0 };
+  }
+  
+  if (colorStr.startsWith('rgba')) {
+    const matches = colorStr.match(/[\d.]+/g);
+    if (matches && matches.length >= 4) {
+      color = rgbFunc(
+        parseFloat(matches[0]) / 255,
+        parseFloat(matches[1]) / 255,
+        parseFloat(matches[2]) / 255
+      );
+      opacity = parseFloat(matches[3]);
+      return { color, opacity };
+    }
+  } else if (colorStr.startsWith('rgb')) {
+    const matches = colorStr.match(/[\d.]+/g);
+    if (matches && matches.length >= 3) {
+      color = rgbFunc(
+        parseFloat(matches[0]) / 255,
+        parseFloat(matches[1]) / 255,
+        parseFloat(matches[2]) / 255
+      );
+      return { color, opacity };
+    }
+  }
+  
+  let cleanHex = colorStr.replace('#', '');
+  if (cleanHex.length === 3) {
+    cleanHex = cleanHex.split('').map(c => c + c).join('');
+  }
+  const r = parseInt(cleanHex.substring(0, 2), 16) / 255;
+  const g = parseInt(cleanHex.substring(2, 4), 16) / 255;
+  const b = parseInt(cleanHex.substring(4, 6), 16) / 255;
+  color = rgbFunc(isNaN(r) ? 0 : r, isNaN(g) ? 0 : g, isNaN(b) ? 0 : b);
+  
+  return { color, opacity };
+};
+
+// Main helper to draw/flatten Fabric.js objects onto the PDF document using pdf-lib
+const flattenFabricAnnotations = async (pdfDoc, fabricCanvases, rgbFunc) => {
+  const pages = pdfDoc.getPages();
+  
+  for (const [pageNumStr, canvas] of Object.entries(fabricCanvases)) {
+    const pageNum = parseInt(pageNumStr, 10);
+    const page = pages[pageNum - 1];
+    if (!page) continue;
+    
+    const { height: pageHeight } = page.getSize();
+    const zoom = canvas.getZoom() || 1.0;
+    const objects = canvas.getObjects();
+    
+    for (const obj of objects) {
+      if (obj.isFormField) {
+        continue; // Skip form fields, they are handled separately
+      }
+      
+      const x = obj.left / zoom;
+      const y = pageHeight - (obj.top / zoom) - ((obj.height * obj.scaleY) / zoom);
+      const w = (obj.width * obj.scaleX) / zoom;
+      const h = (obj.height * obj.scaleY) / zoom;
+      const objOpacity = obj.opacity !== undefined ? obj.opacity : 1.0;
+
+      if (obj.type === 'rect' && !obj.isRedaction) {
+        const { color: borderColor, opacity: borderOpacity } = getColorAndOpacity(obj.stroke, rgbFunc, objOpacity);
+        const { color: fillColor, opacity: fillOpacity } = getColorAndOpacity(obj.fill, rgbFunc, objOpacity);
+        
+        page.drawRectangle({
+          x,
+          y,
+          width: w,
+          height: h,
+          borderColor: obj.stroke && obj.stroke !== 'transparent' ? borderColor : undefined,
+          borderWidth: obj.strokeWidth ? obj.strokeWidth / zoom : 0,
+          color: obj.fill && obj.fill !== 'transparent' ? fillColor : undefined,
+          opacity: fillOpacity,
+          borderOpacity: borderOpacity
+        });
+      }
+      else if (obj.type === 'circle') {
+        const { color: borderColor, opacity: borderOpacity } = getColorAndOpacity(obj.stroke, rgbFunc, objOpacity);
+        const { color: fillColor, opacity: fillOpacity } = getColorAndOpacity(obj.fill, rgbFunc, objOpacity);
+        
+        page.drawEllipse({
+          x: x + w / 2,
+          y: y + h / 2,
+          xRadius: w / 2,
+          yRadius: h / 2,
+          borderColor: obj.stroke && obj.stroke !== 'transparent' ? borderColor : undefined,
+          borderWidth: obj.strokeWidth ? obj.strokeWidth / zoom : 0,
+          color: obj.fill && obj.fill !== 'transparent' ? fillColor : undefined,
+          opacity: fillOpacity,
+          borderOpacity: borderOpacity
+        });
+      }
+      else if (obj.type === 'line') {
+        const { color: strokeColor, opacity: strokeOpacity } = getColorAndOpacity(obj.stroke, rgbFunc, objOpacity);
+        const x1 = obj.x1 / zoom;
+        const y1 = pageHeight - (obj.y1 / zoom);
+        const x2 = obj.x2 / zoom;
+        const y2 = pageHeight - (obj.y2 / zoom);
+        
+        page.drawLine({
+          start: { x: x1, y: y1 },
+          end: { x: x2, y: y2 },
+          color: strokeColor,
+          thickness: (obj.strokeWidth || 3) / zoom,
+          opacity: strokeOpacity
+        });
+      }
+      else if (obj.type === 'path') {
+        const pathArray = obj.path;
+        if (Array.isArray(pathArray)) {
+          const { color: strokeColor, opacity: strokeOpacity } = getColorAndOpacity(obj.stroke, rgbFunc, objOpacity);
+          const scaleX = obj.scaleX || 1.0;
+          const scaleY = obj.scaleY || 1.0;
+          const left = obj.left;
+          const top = obj.top;
+          const pathOffset = obj.pathOffset || { x: 0, y: 0 };
+          
+          let lastX = 0;
+          let lastY = 0;
+          
+          for (const segment of pathArray) {
+            const command = segment[0];
+            if (command === 'M') {
+              lastX = (segment[1] - pathOffset.x) * scaleX + left;
+              lastY = (segment[2] - pathOffset.y) * scaleY + top;
+            } else if (command === 'L' || command === 'Q') {
+              const nextX = (segment[segment.length - 2] - pathOffset.x) * scaleX + left;
+              const nextY = (segment[segment.length - 1] - pathOffset.y) * scaleY + top;
+              
+              const pdfX1 = lastX / zoom;
+              const pdfY1 = pageHeight - (lastY / zoom);
+              const pdfX2 = nextX / zoom;
+              const pdfY2 = pageHeight - (nextY / zoom);
+              
+              page.drawLine({
+                start: { x: pdfX1, y: pdfY1 },
+                end: { x: pdfX2, y: pdfY2 },
+                color: strokeColor,
+                thickness: (obj.strokeWidth || 3) / zoom,
+                opacity: strokeOpacity
+              });
+              
+              lastX = nextX;
+              lastY = nextY;
+            }
+          }
+        }
+      }
+      else if (obj.type === 'i-text' || obj.type === 'text' || obj.type === 'textbox') {
+        const { color: textColor, opacity: textOpacity } = getColorAndOpacity(obj.fill, rgbFunc, objOpacity);
+        page.drawText(obj.text, {
+          x,
+          y: y + 2 / zoom,
+          size: (obj.fontSize || 14) / zoom,
+          color: textColor,
+          opacity: textOpacity
+        });
+      }
+      else if (obj.isStamp) {
+        const borderRect = obj.item ? obj.item(0) : null;
+        const textObj = obj.item ? obj.item(1) : null;
+        
+        const borderStrokeColor = borderRect ? borderRect.stroke : '#10b981';
+        const textFillColor = textObj ? textObj.fill : '#10b981';
+        
+        const { color: borderColor, opacity: borderOpacity } = getColorAndOpacity(borderStrokeColor, rgbFunc, objOpacity);
+        const { color: textColor, opacity: textOpacity } = getColorAndOpacity(textFillColor, rgbFunc, objOpacity);
+        
+        page.drawRectangle({
+          x,
+          y,
+          width: w,
+          height: h,
+          borderColor: borderColor,
+          borderWidth: 2,
+          color: rgbFunc(1, 1, 1),
+          opacity: objOpacity,
+          borderOpacity: borderOpacity
+        });
+        
+        page.drawText(obj.stampText || 'APPROVED', {
+          x: x + 10 / zoom,
+          y: y + 12 / zoom,
+          size: (textObj ? textObj.fontSize : 14) / zoom,
+          color: textColor,
+          opacity: textOpacity
+        });
+      }
+      else if (obj.type === 'image' || obj.isImage) {
+        let src = obj.src || (obj._element && obj._element.src);
+        if (src && src.startsWith('data:image/')) {
+          try {
+            const parts = src.split(',');
+            const base64Data = parts[1];
+            const format = parts[0].split(';')[0].split('/')[1] || 'png';
+            const imgBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+            
+            let embeddedImage;
+            if (format.toLowerCase().includes('png')) {
+              embeddedImage = await pdfDoc.embedPng(imgBytes);
+            } else {
+              embeddedImage = await pdfDoc.embedJpg(imgBytes);
+            }
+            
+            page.drawImage(embeddedImage, {
+              x,
+              y,
+              width: w,
+              height: h,
+              opacity: objOpacity
+            });
+          } catch (imgErr) {
+            console.error("Error embedding Fabric image in PDF save:", imgErr);
+          }
+        }
+      }
+    }
+  }
+};
+
 export default function App() {
   const [tabs, setTabs] = useState([]);
   const [activeTabId, setActiveTabId] = useState(null);
-  
-  // App configurations
+  const [recentFiles, setRecentFiles] = useState([]);
+  const [imageToInsert, setImageToInsert] = useState(null);
+
   const [activeMode, setActiveMode] = useState(MODES.VIEW);
   const [activeTool, setActiveTool] = useState('select');
   const [commentColor, setCommentColor] = useState('#6366f1');
@@ -262,8 +491,80 @@ export default function App() {
   // Get active tab object
   const activeTab = tabs.find(t => t.id === activeTabId);
 
+  const loadRecentFiles = async () => {
+    if (window.api) {
+      try {
+        const files = await window.api.invoke(IPC_CHANNELS.APP_RECENT_FILES, { action: 'get' });
+        setRecentFiles(files || []);
+      } catch (err) {
+        console.error('Failed to load recent files from main process:', err);
+      }
+    } else {
+      let files = [];
+      const stored = localStorage.getItem('gaupdf-recents');
+      if (stored) {
+        try { files = JSON.parse(stored); } catch (_) {}
+      }
+      setRecentFiles(files);
+    }
+  };
+
+  const handleActiveToolChange = (tool) => {
+    if (tool === 'image') {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.onchange = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            setImageToInsert(event.target.result);
+            setActiveTool('image');
+          };
+          reader.readAsDataURL(file);
+        } else {
+          setActiveTool('select');
+        }
+      };
+      input.click();
+    } else {
+      setActiveTool(tool);
+    }
+  };
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      const isCmdOrCtrl = e.ctrlKey || e.metaKey;
+      if (isCmdOrCtrl) {
+        if (e.key === 'n' || e.key === 'N') {
+          e.preventDefault();
+          handleCreateBlankPDF();
+        } else if (e.key === 'o' || e.key === 'O') {
+          e.preventDefault();
+          handleOpenAnotherFile();
+        } else if (e.key === 's' || e.key === 'S') {
+          e.preventDefault();
+          if (e.shiftKey) {
+            handleSaveAs();
+          } else {
+            handleSave();
+          }
+        } else if (e.key === 'p' || e.key === 'P') {
+          e.preventDefault();
+          handlePrint();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [tabs, activeTabId]);
+
   // Initial routing and setup based on CLI window config arguments
   useEffect(() => {
+    loadRecentFiles();
+
     const config = window.api ? window.api.getWindowConfig() : { mode: 'welcome', filePath: null };
     if (config.filePath) {
       loadPDF(config.filePath);
@@ -326,7 +627,7 @@ export default function App() {
   }, [commentColor, strokeWidth]);
 
   // Load a PDF document into application state
-  const loadPDF = async (filePath) => {
+  const loadPDF = async (filePath, isNew = false) => {
     NotificationSystem.info('File Load', 'Loading PDF document...');
     try {
       let data = null;
@@ -337,10 +638,10 @@ export default function App() {
       const name = filePath.split(/[/\\]/).pop();
       if (data) {
         const pdfDoc = await pdfjsLib.getDocument({ data }).promise;
-        addTab(name, filePath, pdfDoc);
+        addTab(name, filePath, pdfDoc, isNew);
         NotificationSystem.success('File Load', 'PDF document loaded successfully.');
       } else {
-        loadMockPDF(filePath);
+        loadMockPDF(filePath, isNew);
       }
     } catch (err) {
       console.error(err);
@@ -348,7 +649,7 @@ export default function App() {
     }
   };
 
-  const loadMockPDF = (filePath) => {
+  const loadMockPDF = (filePath, isNew = false) => {
     const name = filePath.split(/[/\\]/).pop();
     const mockDoc = {
       numPages: 3,
@@ -387,12 +688,12 @@ export default function App() {
         { title: '3. Technical Guide', dest: 3 }
       ]
     };
-    addTab(name, filePath, mockDoc);
+    addTab(name, filePath, mockDoc, isNew);
     NotificationSystem.success('Mock PDF', 'Loaded dummy PDF in preview mode.');
   };
 
   // Add document to workspace tabs
-  const addTab = (name, filePath, pdfDoc) => {
+  const addTab = (name, filePath, pdfDoc, isNew = false) => {
     extendPdfDocWithOutlineOps(pdfDoc);
     const tabId = 'tab_' + Math.random().toString(36).substring(2, 9);
     const newTab = {
@@ -402,14 +703,96 @@ export default function App() {
       pdfDoc,
       currentPage: 1,
       zoom: 1.0,
-      layout: 'single'
+      layout: 'single',
+      isNew
     };
     setTabs(prev => [...prev, newTab]);
     setActiveTabId(tabId);
     
-    // Add to recent files store
+    // Add to recent files store if not a temporary new blank document
+    if (!isNew) {
+      if (window.api) {
+        window.api.invoke(IPC_CHANNELS.APP_RECENT_FILES, { action: 'add', path: filePath }).then(() => {
+          loadRecentFiles();
+        });
+      } else {
+        let recents = [];
+        const stored = localStorage.getItem('gaupdf-recents');
+        if (stored) {
+          try { recents = JSON.parse(stored); } catch (_) {}
+        }
+        recents = recents.filter(f => f !== filePath);
+        recents.unshift(filePath);
+        if (recents.length > 10) recents = recents.slice(0, 10);
+        localStorage.setItem('gaupdf-recents', JSON.stringify(recents));
+        loadRecentFiles();
+      }
+    }
+  };
+
+  const handleRecentClick = (file) => {
+    const pathStr = typeof file === 'string' ? file : file.path;
     if (window.api) {
-      window.api.invoke(IPC_CHANNELS.APP_RECENT_FILES, { action: 'add', path: filePath });
+      window.api.openFileInNewWindow(pathStr);
+    } else {
+      loadPDF(pathStr);
+    }
+  };
+
+  const handleClearHistory = async () => {
+    if (window.api) {
+      await window.api.invoke(IPC_CHANNELS.APP_RECENT_FILES, { action: 'clear' });
+    } else {
+      localStorage.removeItem('gaupdf-recents');
+    }
+    NotificationSystem.success('History', 'Recent files history cleared successfully.');
+    loadRecentFiles();
+  };
+
+  const handleRemoveRecent = async (e, filePath) => {
+    if (e) e.stopPropagation();
+    if (window.api) {
+      await window.api.invoke(IPC_CHANNELS.APP_RECENT_FILES, { action: 'remove', path: filePath });
+    } else {
+      let files = [];
+      const stored = localStorage.getItem('gaupdf-recents');
+      if (stored) {
+        try { files = JSON.parse(stored); } catch (_) {}
+      }
+      files = files.filter(f => f !== filePath);
+      localStorage.setItem('gaupdf-recents', JSON.stringify(files));
+    }
+    NotificationSystem.info('History', 'Removed file from history.');
+    loadRecentFiles();
+  };
+
+  const handleCreateBlankPDF = async () => {
+    if (window.api) {
+      try {
+        NotificationSystem.info('New PDF', 'Creating blank PDF document...');
+        await window.api.invoke('pdf:create-blank');
+      } catch (err) {
+        NotificationSystem.error('New PDF', 'Failed to create blank PDF: ' + err.message);
+      }
+    } else {
+      // browser mock fallback
+      const mockDoc = {
+        numPages: 1,
+        getPage: async (num) => ({
+          view: [0, 0, 595, 842],
+          getViewport: ({ scale }) => ({ width: 595 * scale, height: 842 * scale, scale }),
+          render: (renderCtx) => {
+            const ctx = renderCtx.canvasContext;
+            const vp = renderCtx.viewport;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, vp.width, vp.height);
+            return { promise: Promise.resolve() };
+          }
+        }),
+        getOutline: async () => []
+      };
+      addTab('Untitled.pdf', 'Untitled.pdf', mockDoc, true);
+      NotificationSystem.success('Mock PDF', 'Loaded blank PDF in preview mode.');
     }
   };
 
@@ -534,8 +917,125 @@ export default function App() {
   };
 
   // Operations: Document Save / Save As / Print
+  const compilePdfBytes = async () => {
+    if (!window.api) return null;
+    try {
+      const { PDFDocument, PDFString, rgb } = await import('pdf-lib');
+      const rawBytes = await window.api.invoke('file:read', activeTab.filePath);
+      if (!rawBytes) return null;
+
+      const pdfDoc = await PDFDocument.load(rawBytes);
+      const form = pdfDoc.getForm();
+      const pages = pdfDoc.getPages();
+
+      // Get active form field IDs on the canvas to handle synchronized deletion
+      const activeFieldIds = new Set();
+      Object.values(fabricInstancesRef.current).forEach(canvas => {
+        canvas.getObjects().forEach(obj => {
+          if (obj.isFormField) {
+            activeFieldIds.add(obj.fieldId);
+          }
+        });
+      });
+
+      // Sync deletion: remove fields in PDF that are no longer on any canvas
+      const fields = form.getFields();
+      fields.forEach(field => {
+        const name = field.getName();
+        if (!activeFieldIds.has(name)) {
+          try {
+            form.removeField(field);
+          } catch (e) {
+            console.warn(`Could not remove field ${name}:`, e);
+          }
+        }
+      });
+
+      // Update or add form fields from Fabric canvases
+      for (const [pageNumStr, canvas] of Object.entries(fabricInstancesRef.current)) {
+        const pageNum = parseInt(pageNumStr, 10);
+        const page = pages[pageNum - 1];
+        if (!page) continue;
+
+        const { height: pageHeight } = page.getSize();
+        const zoom = canvas.getZoom() || 1.0;
+        const objects = canvas.getObjects();
+
+        for (const obj of objects) {
+          if (obj.isFormField) {
+            const x = obj.left / zoom;
+            const y = pageHeight - (obj.top / zoom) - ((obj.height * obj.scaleY) / zoom);
+            const w = (obj.width * obj.scaleX) / zoom;
+            const h = (obj.height * obj.scaleY) / zoom;
+
+            if (obj.fieldType === 'text') {
+              let textField;
+              try {
+                textField = form.getTextField(obj.fieldId);
+              } catch (e) {
+                textField = form.createTextField(obj.fieldId);
+              }
+              textField.setText(obj.text || obj.value || '');
+              if (obj.maxLength > 0) {
+                textField.setMaxLength(obj.maxLength);
+              }
+              textField.setRequired(!!obj.required);
+              
+              try {
+                textField.acroField.getWidgets().forEach(widget => textField.acroField.removeWidget(widget));
+                textField.addToPage(page, { x, y, width: w, height: h });
+              } catch (err) {
+                try {
+                  textField.addToPage(page, { x, y, width: w, height: h });
+                } catch (e2) {}
+              }
+            } else if (obj.fieldType === 'checkbox') {
+              let checkBox;
+              try {
+                checkBox = form.getCheckBox(obj.fieldId);
+              } catch (e) {
+                checkBox = form.createCheckBox(obj.fieldId);
+              }
+              if (obj.value) {
+                checkBox.check();
+              } else {
+                checkBox.uncheck();
+              }
+              checkBox.setRequired(!!obj.required);
+
+              try {
+                checkBox.acroField.getWidgets().forEach(widget => checkBox.acroField.removeWidget(widget));
+                checkBox.addToPage(page, { x, y, width: w, height: h });
+              } catch (err) {
+                try {
+                  checkBox.addToPage(page, { x, y, width: w, height: h });
+                } catch (e2) {}
+              }
+            }
+          }
+        }
+      }
+
+      // Flatten drawings, text shapes, notes, and stamps
+      await flattenFabricAnnotations(pdfDoc, fabricInstancesRef.current, rgb);
+
+      if (activeTab.pdfDoc && activeTab.pdfDoc._customOutline) {
+        writeOutlines(pdfDoc, activeTab.pdfDoc._customOutline, PDFString);
+      }
+
+      return await pdfDoc.save();
+    } catch (err) {
+      console.error("Error compiling PDF bytes:", err);
+      throw err;
+    }
+  };
+
   const handleSave = async () => {
     if (!activeTab) return;
+    if (activeTab.isNew) {
+      await handleSaveAs();
+      return;
+    }
     NotificationSystem.info('Saving Document', 'Saving PDF modifications...');
 
     const serializedAnnotations = {};
@@ -543,117 +1043,9 @@ export default function App() {
       serializedAnnotations[pageNum] = instance.toJSON(['isNoteCircle', 'noteText', 'isTextCallout', 'isStamp', 'stampText', 'isFormField', 'fieldType', 'fieldId', 'maxLength', 'required', 'value', 'isRedaction']);
     });
 
-    let pdfBytes = null;
     if (window.api) {
       try {
-        const { PDFDocument, PDFString } = await import('pdf-lib');
-        const rawBytes = await window.api.invoke('file:read', activeTab.filePath);
-        if (rawBytes) {
-          const pdfDoc = await PDFDocument.load(rawBytes);
-          const form = pdfDoc.getForm();
-          const pages = pdfDoc.getPages();
-
-          // Get active form field IDs on the canvas to handle synchronized deletion
-          const activeFieldIds = new Set();
-          Object.values(fabricInstancesRef.current).forEach(canvas => {
-            canvas.getObjects().forEach(obj => {
-              if (obj.isFormField) {
-                activeFieldIds.add(obj.fieldId);
-              }
-            });
-          });
-
-          // Sync deletion: remove fields in PDF that are no longer on any canvas
-          const fields = form.getFields();
-          fields.forEach(field => {
-            const name = field.getName();
-            if (!activeFieldIds.has(name)) {
-              try {
-                form.removeField(field);
-              } catch (e) {
-                console.warn(`Could not remove field ${name}:`, e);
-              }
-            }
-          });
-
-          // Update or add form fields from Fabric canvases
-          for (const [pageNumStr, canvas] of Object.entries(fabricInstancesRef.current)) {
-            const pageNum = parseInt(pageNumStr, 10);
-            const page = pages[pageNum - 1];
-            if (!page) continue;
-
-            const { height: pageHeight } = page.getSize();
-            const zoom = canvas.getZoom() || 1.0;
-            const objects = canvas.getObjects();
-
-            for (const obj of objects) {
-              if (obj.isFormField) {
-                const x = obj.left / zoom;
-                const y = pageHeight - (obj.top / zoom) - ((obj.height * obj.scaleY) / zoom);
-                const w = (obj.width * obj.scaleX) / zoom;
-                const h = (obj.height * obj.scaleY) / zoom;
-
-                if (obj.fieldType === 'text') {
-                  let textField;
-                  try {
-                    textField = form.getTextField(obj.fieldId);
-                  } catch (e) {
-                    textField = form.createTextField(obj.fieldId);
-                  }
-                  textField.setText(obj.text || obj.value || '');
-                  if (obj.maxLength > 0) {
-                    textField.setMaxLength(obj.maxLength);
-                  }
-                  textField.setRequired(!!obj.required);
-                  
-                  try {
-                    textField.acroField.getWidgets().forEach(widget => textField.acroField.removeWidget(widget));
-                    textField.addToPage(page, { x, y, width: w, height: h });
-                  } catch (err) {
-                    try {
-                      textField.addToPage(page, { x, y, width: w, height: h });
-                    } catch (e2) {}
-                  }
-                } else if (obj.fieldType === 'checkbox') {
-                  let checkBox;
-                  try {
-                    checkBox = form.getCheckBox(obj.fieldId);
-                  } catch (e) {
-                    checkBox = form.createCheckBox(obj.fieldId);
-                  }
-                  if (obj.value) {
-                    checkBox.check();
-                  } else {
-                    checkBox.uncheck();
-                  }
-                  checkBox.setRequired(!!obj.required);
-
-                  try {
-                    checkBox.acroField.getWidgets().forEach(widget => checkBox.acroField.removeWidget(widget));
-                    checkBox.addToPage(page, { x, y, width: w, height: h });
-                  } catch (err) {
-                    try {
-                      checkBox.addToPage(page, { x, y, width: w, height: h });
-                    } catch (e2) {}
-                  }
-                }
-              }
-            }
-          }
-
-          if (activeTab.pdfDoc && activeTab.pdfDoc._customOutline) {
-            writeOutlines(pdfDoc, activeTab.pdfDoc._customOutline, PDFString);
-          }
-
-          pdfBytes = await pdfDoc.save();
-        }
-      } catch (err) {
-        console.error("Error compiling form fields during save:", err);
-      }
-    }
-
-    if (window.api) {
-      try {
+        const pdfBytes = await compilePdfBytes();
         const success = await window.api.invoke(IPC_CHANNELS.FILE_SAVE, {
           filePath: activeTab.filePath,
           data: pdfBytes,
@@ -676,13 +1068,26 @@ export default function App() {
 
   const handleSaveAs = async () => {
     if (!activeTab) return;
+    NotificationSystem.info('Saving Document', 'Compiling PDF modifications...');
+    
     if (window.api) {
       try {
+        const pdfBytes = await compilePdfBytes();
         const result = await window.api.invoke(IPC_CHANNELS.FILE_SAVE_AS, {
-          defaultPath: activeTab.filePath
+          defaultPath: activeTab.filePath,
+          data: pdfBytes
         });
         if (result && result.filePath) {
           NotificationSystem.success('Save As', `Document saved to: ${result.filePath}`);
+          
+          setTabs(prev => prev.map(t => t.id === activeTab.id ? {
+            ...t,
+            name: result.name,
+            filePath: result.filePath,
+            isNew: false
+          } : t));
+
+          loadRecentFiles();
         }
       } catch (err) {
         NotificationSystem.error('Save As', err.message);
@@ -1338,6 +1743,9 @@ export default function App() {
         onConvertToPdfClick={handleConvertToPdf}
         onConvertFromPdfClick={handleConvertFromPdf}
         hasActiveDoc={!!activeTab}
+        recentFiles={recentFiles}
+        onRecentClick={handleRecentClick}
+        onNewClick={handleCreateBlankPDF}
       />
 
       {/* Conditionally render toolbar if doc is active */}
@@ -1345,7 +1753,7 @@ export default function App() {
         activeMode={activeMode}
         setActiveMode={setActiveMode}
         activeTool={activeTool}
-        setActiveTool={setActiveTool}
+        setActiveTool={handleActiveToolChange}
         commentColor={commentColor}
         setCommentColor={setCommentColor}
         strokeWidth={strokeWidth}
@@ -1415,6 +1823,11 @@ export default function App() {
             onOpenConvertFromPdfDialog={handleConvertFromPdf}
             onOpenWatermarkDialog={() => setShowWatermarkDialog(true)}
             onOpenHeaderFooterDialog={() => setShowHeaderFooterDialog(true)}
+            recentFiles={recentFiles}
+            onClearHistory={handleClearHistory}
+            onRemoveRecent={handleRemoveRecent}
+            onRecentClick={handleRecentClick}
+            onNewBlankPDF={handleCreateBlankPDF}
           />
         ) : (
           <div style={{ display: 'flex', flex: 1, flexDirection: 'column', overflow: 'hidden' }}>
@@ -1438,10 +1851,11 @@ export default function App() {
               activeTab={activeTab}
               activeMode={activeMode}
               activeTool={activeTool}
-              setActiveTool={setActiveTool}
+              setActiveTool={handleActiveToolChange}
               commentColor={commentColor}
               strokeWidth={strokeWidth}
               savedSignatureDataUrl={savedSignatureDataUrl}
+              imageToInsert={imageToInsert}
               setSelectedObject={setSelectedObject}
               formFields={formFields}
               onAddFormField={handleAddFormField}

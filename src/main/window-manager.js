@@ -1,12 +1,17 @@
-// src/main/window-manager.js
 import { BrowserWindow, app } from 'electron';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 import { buildMenu } from './menu-builder.js';
+import { addToRecentFiles } from './file-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = join(__filename, '..');
-const preloadPath = join(__dirname, '../preload/index.js');
+
+let preloadPath = join(__dirname, '../preload/index.js');
+if (!fs.existsSync(preloadPath)) {
+  preloadPath = join(__dirname, '../preload/index.mjs');
+}
 
 class WindowManager {
   constructor() {
@@ -69,8 +74,8 @@ class WindowManager {
     return win;
   }
 
-  createDocumentWindow(filePath) {
-    console.log(`[WindowManager] Creating Document Window for file: ${filePath}`);
+  createDocumentWindow(filePath, isNew = false) {
+    console.log(`[WindowManager] Creating Document Window for file: ${filePath}, isNew: ${isNew}`);
     
     // Focus existing window for this file if already open
     for (const winInfo of this.windows.values()) {
@@ -80,6 +85,15 @@ class WindowManager {
           winInfo.window.focus();
           return winInfo.window;
         }
+      }
+    }
+
+    // Add to recent files if not a temporary new blank document
+    if (!isNew) {
+      try {
+        addToRecentFiles(filePath);
+      } catch (err) {
+        console.error('[WindowManager] Failed to add file to recents:', err);
       }
     }
 
@@ -97,7 +111,8 @@ class WindowManager {
         sandbox: true,
         additionalArguments: [
           '--window-type=document',
-          `--file-path=${filePath}`
+          `--file-path=${filePath}`,
+          `--is-new=${isNew}`
         ]
       }
     });
