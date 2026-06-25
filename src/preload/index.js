@@ -1,11 +1,28 @@
 // src/preload/index.js
-
 const { contextBridge, ipcRenderer } = require('electron');
+
+// Extract additionalArguments passed from the main process
+const args = process.argv || [];
+const windowTypeArg = args.find(arg => arg.startsWith('--window-type='));
+const filePathArg = args.find(arg => arg.startsWith('--file-path='));
+
+const windowConfig = {
+  mode: windowTypeArg ? windowTypeArg.split('=')[1] : 'welcome',
+  filePath: filePathArg ? filePathArg.split('=')[1] : null
+};
+
+console.log('[Preload] Exposing API with window config:', windowConfig);
 
 // Expose protected APIs to the renderer process
 contextBridge.exposeInMainWorld('api', {
+  // Window Configuration
+  getWindowConfig: () => windowConfig,
+
+  // Multi-window operations
+  openFileInNewWindow: (filePath) => ipcRenderer.invoke('app:open-file-window', filePath),
+
+  // Basic IPC utilities (highly compatible with old renderer code)
   send: (channel, ...args) => {
-    // Whitelist channels
     ipcRenderer.send(channel, ...args);
   },
   receive: (channel, func) => {

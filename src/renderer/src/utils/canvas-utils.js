@@ -1,5 +1,3 @@
-// src/renderer/js/utils/canvas-utils.js
-
 /**
  * Get pointer position on a Fabric.js canvas, respecting current zoom and pan.
  * @param {fabric.Canvas} fabricCanvas 
@@ -21,6 +19,9 @@ export function getCanvasPointer(fabricCanvas, event) {
  * @param {fabric.Point} [point] Zoom center point, defaults to center of canvas
  */
 export function zoomCanvas(fabricCanvas, zoomLevel, point) {
+  const fabric = window.fabric;
+  if (!fabric) return;
+
   let targetPoint = point;
   if (!targetPoint) {
     targetPoint = new fabric.Point(fabricCanvas.getWidth() / 2, fabricCanvas.getHeight() / 2);
@@ -75,13 +76,10 @@ export function resizeFabricCanvas(fabricCanvas, width, height) {
  * @param {'light'|'dark'} theme 
  */
 export function applyThemeToFabric(fabricCanvas, theme) {
-  // Setup guidelines or selection border colors based on theme
   const isDark = theme === 'dark';
-  const strokeColor = isDark ? '#ffffff' : '#000000';
   
   fabricCanvas.forEachObject((obj) => {
-    // If it's a guide or text/shape, we could adjust properties,
-    // but usually, we just adjust the selection handle colors:
+    // Adjust the selection handle colors based on theme
     obj.borderColor = isDark ? '#2196f3' : '#1565c0';
     obj.cornerColor = isDark ? '#90caf9' : '#1e88e5';
     obj.cornerStrokeColor = isDark ? '#2196f3' : '#1565c0';

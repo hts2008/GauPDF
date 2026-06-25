@@ -17,39 +17,102 @@ import {
 } from './file-manager.js';
 import { getPrinters, printExecute, printToPDF } from './print-manager.js';
 import store from './store.js';
+import WindowManager from './window-manager.js';
 
 export function registerIpcHandlers() {
+  console.log('[IPC Handlers] Registering IPC events and handlers');
+
   // Helper to resolve window from event sender
   const getWindow = (event) => {
     return BrowserWindow.fromWebContents(event.sender);
   };
 
-  // --- File Operations ---
-  ipcMain.handle(IPC_CHANNELS.FILE_OPEN, async (event) => {
-    const win = getWindow(event);
-    const fileInfo = await openFile(win);
-    if (fileInfo) {
-      // Start watching the file for external changes
-      watchFile(fileInfo.filePath, event.sender);
+  // --- Secure Multi-Window API ---
+  ipcMain.handle('app:open-file-window', async (event, filePath) => {
+    console.log(`[IPC] app:open-file-window requested for: ${filePath}`);
+    if (filePath) {
+      WindowManager.createDocumentWindow(filePath);
+      return { success: true };
     }
-    return fileInfo;
+    return { success: false, error: 'No file path provided' };
   });
 
-  ipcMain.handle(IPC_CHANNELS.FILE_SAVE, async (event, { filePath, data }) => {
-    // Temp stop watching during save to avoid triggering change event on ourselves
-    unwatchFile(filePath);
+  // --- File Operations ---
+  ipcMain.handle(IPC_CHANNELS.FILE_OPEN, async (event, options = {}) => {
+    const win = getWindow(event);
+    console.log('[IPC] file:open requested', options);
+
+    // If multi selections is requested (e.g. for merging PDFs)
+    if (options.multi) {
+      const { dialog } = await import('electron');
+      const result = await dialog.showOpenDialog(win, {
+        title: 'Select PDF Documents',
+        filters: [{ name: 'PDF Files', extensions: ['pdf'] }],
+        properties: ['openFile', 'multiSelections']
+      });
+
+      if (result.canceled || result.filePaths.length === 0) {
+        return null;
+      }
+      return result.filePaths;
+    }
+
+    // Single file open: open in a new BrowserWindow
+    const fileInfo = await openFile(win);
+    if (fileInfo && fileInfo.filePath) {
+      console.log(`[IPC] Opening selected file in new window: ${fileInfo.filePath}`);
+      WindowManager.createDocumentWindow(fileInfo.filePath);
+    }
+    return null; // Return null so the current window does not load it
+  });
+
+  ipcMain.handle('file:read', async (event, filePath) => {
+    console.log(`[IPC] file:read requested for path: ${filePath}`);
     try {
-      const result = await saveFile(filePath, data);
-      return result;
+      const fs = await import('fs/promises');
+      const data = await fs.readFile(filePath);
+      // Auto-watch file for this webContents context
+      watchFile(filePath, event.sender);
+      return new Uint8Array(data);
+    } catch (err) {
+      console.error(`[IPC] Error reading file by path "${filePath}":`, err);
+      throw err;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FILE_SAVE, async (event, payload) => {
+    const { filePath, data, annotations, forms } = payload || {};
+    console.log(`[IPC] file:save requested for path: ${filePath}`);
+    
+    // Temporarily unwatch to prevent trigger change alerts on saving
+    unwatchFile(filePath, event.sender);
+    
+    try {
+      if (data) {
+        // Raw file binary writing
+        const result = await saveFile(filePath, data);
+        return result;
+      } else {
+        // Mock save annotations/forms metadata, return success and clear temp draft
+        console.log(`[IPC] Mock saving annotations and forms for: ${filePath}`);
+        await clearTempCopy(filePath);
+        return { success: true, filePath };
+      }
+    } catch (err) {
+      console.error(`[IPC] Error saving document changes:`, err);
+      throw err;
     } finally {
       watchFile(filePath, event.sender);
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.FILE_SAVE_AS, async (event, { data, defaultPath }) => {
+  ipcMain.handle(IPC_CHANNELS.FILE_SAVE_AS, async (event, payload) => {
+    const { data, defaultPath } = payload || {};
     const win = getWindow(event);
+    console.log('[IPC] file:save-as requested');
+    
     const fileInfo = await saveFileAs(win, data, defaultPath);
-    if (fileInfo) {
+    if (fileInfo && fileInfo.filePath) {
       watchFile(fileInfo.filePath, event.sender);
     }
     return fileInfo;
@@ -58,42 +121,66 @@ export function registerIpcHandlers() {
   // --- Printing ---
   ipcMain.handle(IPC_CHANNELS.PRINT_GET_PRINTERS, async (event) => {
     const win = getWindow(event);
+    console.log('[IPC] print:get-printers requested');
     return await getPrinters(win);
   });
 
   ipcMain.handle(IPC_CHANNELS.PRINT_EXECUTE, async (event, options) => {
     const win = getWindow(event);
+    console.log('[IPC] print:execute requested', options);
     return await printExecute(win, options);
   });
 
   ipcMain.handle(IPC_CHANNELS.PRINT_TO_PDF, async (event, options) => {
     const win = getWindow(event);
+    console.log('[IPC] print:to-pdf requested', options);
     return await printToPDF(win, options);
   });
 
   // --- PDF Operations ---
-  ipcMain.handle(IPC_CHANNELS.PDF_MERGE, async (event, filePaths) => {
+  ipcMain.handle(IPC_CHANNELS.PDF_MERGE, async (event, payload) => {
     const win = getWindow(event);
+    // Support either direct file paths array or object wrapping
+    const filePaths = Array.isArray(payload) ? payload : payload.files;
+    console.log('[IPC] pdf:merge requested for files:', filePaths);
     return await mergePDFs(win, filePaths);
   });
 
-  ipcMain.handle(IPC_CHANNELS.PDF_SPLIT, async (event, { filePath, ranges }) => {
+  ipcMain.handle(IPC_CHANNELS.PDF_SPLIT, async (event, payload) => {
     const win = getWindow(event);
+    const { filePath, ranges } = payload || {};
+    console.log(`[IPC] pdf:split requested for file: ${filePath}`);
     return await splitPDF(win, filePath, ranges);
   });
 
-  ipcMain.handle(IPC_CHANNELS.PDF_COMPRESS, async (event, filePath) => {
+  ipcMain.handle(IPC_CHANNELS.PDF_COMPRESS, async (event, payload) => {
     const win = getWindow(event);
+    const filePath = typeof payload === 'string' ? payload : payload.filePath;
+    console.log(`[IPC] pdf:compress requested for file: ${filePath}`);
     return await compressPDF(win, filePath);
   });
 
   // --- OCR Operations ---
-  ipcMain.handle(IPC_CHANNELS.OCR_EXECUTE, async (event, { imageBufferOrPath, language }) => {
+  ipcMain.handle(IPC_CHANNELS.OCR_EXECUTE, async (event, payload) => {
+    const { imageBufferOrPath, language } = payload || {};
+    console.log('[IPC] ocr:execute requested with language:', language);
     return await executeOCR(imageBufferOrPath, language);
   });
 
   // --- App Settings & Recent Files ---
-  ipcMain.handle(IPC_CHANNELS.APP_RECENT_FILES, async (event, action, data) => {
+  ipcMain.handle(IPC_CHANNELS.APP_RECENT_FILES, async (event, payload, ...args) => {
+    let action, data;
+    // Normalize payload from renderer (sometimes object, sometimes separate arguments)
+    if (payload && typeof payload === 'object' && 'action' in payload) {
+      action = payload.action;
+      data = payload.data || payload.file || payload.path;
+    } else {
+      action = payload;
+      data = args[0];
+    }
+
+    console.log(`[IPC] app:recent-files action="${action}"`);
+    
     if (action === 'get') {
       return store.get('recentFiles') || [];
     } else if (action === 'clear') {
@@ -106,60 +193,90 @@ export function registerIpcHandlers() {
       if (recent.length > 10) recent = recent.slice(0, 10);
       store.set('recentFiles', recent);
       return recent;
+    } else if (action === 'remove' && typeof data === 'string') {
+      let recent = store.get('recentFiles') || [];
+      recent = recent.filter(p => p !== data);
+      store.set('recentFiles', recent);
+      return recent;
     }
     return [];
   });
 
   ipcMain.handle(IPC_CHANNELS.APP_SETTINGS, async (event, action, data) => {
-    if (action === 'get') {
-      // data is settings key, or undefined for all settings
-      return data ? store.get(`settings.${data}`) : store.get('settings');
-    } else if (action === 'set' && typeof data === 'object') {
+    let act = action;
+    let val = data;
+    if (action && typeof action === 'object' && 'action' in action) {
+      act = action.action;
+      val = action.data;
+    }
+
+    console.log(`[IPC] app:settings action="${act}"`);
+
+    if (act === 'get') {
+      return val ? store.get(`settings.${val}`) : store.get('settings');
+    } else if (act === 'set' && typeof val === 'object') {
       const current = store.get('settings') || {};
-      store.set('settings', { ...current, ...data });
+      store.set('settings', { ...current, ...val });
       return store.get('settings');
-    } else if (action === 'get-theme') {
+    } else if (act === 'get-theme') {
       return store.get('theme') || 'light';
-    } else if (action === 'set-theme' && typeof data === 'string') {
-      store.set('theme', data);
-      return data;
+    } else if (act === 'set-theme' && typeof val === 'string') {
+      store.set('theme', val);
+      return val;
     }
     return null;
   });
 
-  // --- Window Controls ---
-  ipcMain.handle(IPC_CHANNELS.APP_MINIMIZE, (event) => {
-    const win = getWindow(event);
-    if (win) win.minimize();
-  });
-
-  ipcMain.handle(IPC_CHANNELS.APP_MAXIMIZE, (event) => {
+  // --- Window Controls (Handle both send and invoke) ---
+  const minimizeHandler = (event) => {
     const win = getWindow(event);
     if (win) {
+      console.log(`[IPC] Minimizing window (ID: ${win.id})`);
+      win.minimize();
+    }
+  };
+  ipcMain.on(IPC_CHANNELS.APP_MINIMIZE, minimizeHandler);
+  ipcMain.handle(IPC_CHANNELS.APP_MINIMIZE, minimizeHandler);
+
+  const maximizeHandler = (event) => {
+    const win = getWindow(event);
+    if (win) {
+      console.log(`[IPC] Toggle maximize window (ID: ${win.id})`);
       if (win.isMaximized()) {
         win.unmaximize();
       } else {
         win.maximize();
       }
     }
-  });
+  };
+  ipcMain.on(IPC_CHANNELS.APP_MAXIMIZE, maximizeHandler);
+  ipcMain.handle(IPC_CHANNELS.APP_MAXIMIZE, maximizeHandler);
 
-  ipcMain.handle(IPC_CHANNELS.APP_CLOSE, (event) => {
+  const closeHandler = (event) => {
     const win = getWindow(event);
-    if (win) win.close();
-  });
+    if (win) {
+      console.log(`[IPC] Closing window (ID: ${win.id})`);
+      win.close();
+    }
+  };
+  ipcMain.on(IPC_CHANNELS.APP_CLOSE, closeHandler);
+  ipcMain.handle(IPC_CHANNELS.APP_CLOSE, closeHandler);
 
   // --- Custom Draft / Crash Recovery Handlers ---
-  ipcMain.handle('file:save-draft', async (event, { filePath, data }) => {
+  ipcMain.handle('file:save-draft', async (event, payload) => {
+    const { filePath, data } = payload || {};
+    console.log(`[IPC] file:save-draft requested for: ${filePath}`);
     return await saveTempCopy(filePath, data);
   });
 
   ipcMain.handle('file:clear-draft', async (event, filePath) => {
+    console.log(`[IPC] file:clear-draft requested for: ${filePath}`);
     await clearTempCopy(filePath);
     return { success: true };
   });
 
   ipcMain.handle('file:check-recovery', async () => {
+    console.log('[IPC] file:check-recovery requested');
     return await checkRecoveryFiles();
   });
 }

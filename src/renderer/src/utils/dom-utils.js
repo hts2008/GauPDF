@@ -1,5 +1,3 @@
-// src/renderer/js/utils/dom-utils.js
-
 /**
  * Quick query selector helper
  * @param {string} selector 

@@ -1,5 +1,3 @@
-// src/renderer/js/utils/file-utils.js
-
 /**
  * Convert a File object to ArrayBuffer
  * @param {File} file 

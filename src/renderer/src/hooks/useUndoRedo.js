@@ -1,4 +1,4 @@
-// src/renderer/js/utils/history.js
+import { useState, useEffect, useRef } from 'react';
 
 /**
  * Base Command interface
@@ -202,4 +202,54 @@ export class HistoryManager {
     this.redoStack = [];
     this._notify();
   }
+}
+
+/**
+ * React Hook for managing Undo/Redo history stack using Command Pattern.
+ * @param {number} maxDepth Maximum history states allowed (default: 50)
+ */
+export function useUndoRedo(maxDepth = 50) {
+  const historyRef = useRef(null);
+  
+  if (!historyRef.current) {
+    historyRef.current = new HistoryManager(maxDepth);
+  }
+
+  const [state, setState] = useState({
+    canUndo: false,
+    canRedo: false
+  });
+
+  useEffect(() => {
+    const unsubscribe = historyRef.current.onStateChange((newState) => {
+      setState(newState);
+    });
+    return unsubscribe;
+  }, []);
+
+  const executeCommand = (command) => {
+    historyRef.current.execute(command);
+  };
+
+  const undo = () => {
+    historyRef.current.undo();
+  };
+
+  const redo = () => {
+    historyRef.current.redo();
+  };
+
+  const clearHistory = () => {
+    historyRef.current.clear();
+  };
+
+  return {
+    canUndo: state.canUndo,
+    canRedo: state.canRedo,
+    executeCommand,
+    undo,
+    redo,
+    clearHistory,
+    historyManager: historyRef.current
+  };
 }

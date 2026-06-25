@@ -1,7 +1,7 @@
 {
   "name": "gaupdf",
   "version": "1.0.0",
-  "description": "GauPDF Editor — Desktop Application",
+  "description": "GauPDF Editor — Desktop Application (React & Multi-Window)",
   "main": "./out/main/index.js",
   "author": "hts2008 <haitranson2005@gmail.com>",
   "license": "MIT",
@@ -19,9 +19,12 @@
     "jspdf": "^2.5.1",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^4.2.67",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "tesseract.js": "^5.1.0"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
     "electron": "^30.0.9",
     "electron-builder": "^24.13.3",
     "electron-vite": "^2.3.0",

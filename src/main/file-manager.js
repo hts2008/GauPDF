@@ -94,30 +94,50 @@ export async function saveFileAs(browserWindow, data, defaultPath) {
 }
 
 /**
- * Setup a file watcher to notify the renderer if a file is modified externally
+ * Setup a file watcher to notify the renderer if a file is modified externally.
+ * Multi-window safe: keyed by webContents.id and filePath.
  */
 export function watchFile(filePath, webContents) {
-  if (watchers.has(filePath)) {
-    watchers.get(filePath).close();
+  if (!webContents || webContents.isDestroyed()) return;
+  const key = `${webContents.id}:${filePath}`;
+  if (watchers.has(key)) {
+    watchers.get(key).close();
   }
 
-  const watcher = chokidar.watch(filePath, { persistent: true });
+  const watcher = chokidar.watch(filePath, { persistent: true, ignoreInitial: true });
   watcher.on('change', () => {
     if (!webContents.isDestroyed()) {
+      console.log(`[File Watcher] File changed externally: ${filePath}. Notifying window.`);
       webContents.send(IPC_CHANNELS.FILE_CHANGED, filePath);
     }
   });
 
-  watchers.set(filePath, watcher);
+  watchers.set(key, watcher);
 }
 
 /**
- * Stop watching a file
+ * Stop watching a file for a specific window
  */
-export function unwatchFile(filePath) {
-  if (watchers.has(filePath)) {
-    watchers.get(filePath).close();
-    watchers.delete(filePath);
+export function unwatchFile(filePath, webContents) {
+  if (!webContents) return;
+  const key = `${webContents.id}:${filePath}`;
+  if (watchers.has(key)) {
+    watchers.get(key).close();
+    watchers.delete(key);
+  }
+}
+
+/**
+ * Stop all watchers for a specific window
+ */
+export function clearWatchersForWindow(webContents) {
+  if (!webContents) return;
+  const prefix = `${webContents.id}:`;
+  for (const [key, watcher] of watchers.entries()) {
+    if (key.startsWith(prefix)) {
+      watcher.close();
+      watchers.delete(key);
+    }
   }
 }
 
